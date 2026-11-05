@@ -11,7 +11,7 @@
 ## Mail and calendar
 
 - **"Sync error"** in the bottom bar: hover over it for the reason. **Ctrl+R** syncs again. A lost connection fixes itself once you're back online; anything you did offline goes out then.
-- **Older mail is missing**: PeetMail keeps a set number of days on your PC (90 to start with). Search covers that; widen it under **Settings → Storage**.
+- **Older mail is missing**: PeetMail keeps a set number of days on your PC (90 to start with). Search covers that; press **Ctrl+Enter** in a search to look on the server as well, or widen the window under **Settings → Storage**.
 - **No notifications**: PeetMail only notifies while it isn't the window you're using, and Do not disturb (Windows' or your Linux desktop's) hides them. Check **Settings → Notifications & startup**.
 - **Pictures in a message don't show**: they're blocked until you press **i**.
 

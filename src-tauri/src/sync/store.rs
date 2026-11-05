@@ -1,4 +1,4 @@
-//! Settings sync's local bookkeeping (the `sync_items` table, migration 0016) and its own
+//! Settings sync's local bookkeeping (the `sync_items` table, migration 0017) and its own
 //! settings. Every change to a synced setting goes through `touch` (from db::set_setting and
 //! db::delete_setting), whether or not sync is on; changes that arrive from the server go
 //! through `apply_remote`, which writes the setting without marking it as a local change.

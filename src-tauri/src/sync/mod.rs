@@ -47,6 +47,8 @@ const LOCAL: &[&str] = &[
     "update_channel",
     "restarted_to_update",
     "fake_autostart",
+    // Message ids are this database's own (db::clear_search_cache).
+    "message_id_floor",
     // Changing the user's own OAuth app signs out the accounts that use it, so a change made
     // on one device mustn't arrive on another unannounced. Local until that's handled.
     "ms_client_id",

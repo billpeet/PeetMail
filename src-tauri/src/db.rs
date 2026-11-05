@@ -25,7 +25,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0013_draft_sync.sql"),
     include_str!("../migrations/0014_settings_items.sql"),
     include_str!("../migrations/0015_outbox_ids.sql"),
-    include_str!("../migrations/0016_settings_sync.sql"),
+    include_str!("../migrations/0016_search_cache.sql"),
+    include_str!("../migrations/0017_settings_sync.sql"),
 ];
 
 pub struct Db {
@@ -440,13 +441,20 @@ pub fn clear_delta_links(conn: &Connection) -> Result<()> {
 
 // ---------- messages ----------
 
+/// Setting: the highest message id handed out before rows were deleted from the top
+/// (`clear_search_cache`). New rows get ids above it, so an id that drafts, scheduled sends
+/// or undo still hold never comes back as a different message.
+const KEY_MESSAGE_ID_FLOOR: &str = "message_id_floor";
+
 pub fn upsert_message(conn: &Connection, account_id: i64, folder_id: i64, m: &MessageUpsert) -> Result<()> {
     // A new row needs received_at. A partial update for a message we never cached is skipped.
     conn.execute(
-        "INSERT INTO messages (account_id, folder_id, remote_id, conversation_id, subject, from_name, from_address,
+        "INSERT INTO messages (id, account_id, folder_id, remote_id, conversation_id, subject, from_name, from_address,
                                to_json, cc_json, received_at, preview, is_read, is_flagged, has_attachments,
                                importance, inference, message_type, meeting_message_type, sort_at)
-         SELECT ?1, ?2, ?3, COALESCE(?4, ?3), COALESCE(?5, ''), ?6, ?7, COALESCE(?8, '[]'), COALESCE(?9, '[]'),
+         SELECT MAX(COALESCE((SELECT MAX(id) FROM messages), 0),
+                    COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'message_id_floor'), 0)) + 1,
+                ?1, ?2, ?3, COALESCE(?4, ?3), COALESCE(?5, ''), ?6, ?7, COALESCE(?8, '[]'), COALESCE(?9, '[]'),
                 ?10, COALESCE(?11, ''), COALESCE(?12, 0), COALESCE(?13, 0), COALESCE(?14, 0), ?15, ?16,
                 COALESCE(?17, 'message'), ?18, ?10
          WHERE ?10 IS NOT NULL
@@ -498,6 +506,15 @@ pub fn upsert_message(conn: &Connection, account_id: i64, folder_id: i64, m: &Me
             ],
         )?;
     }
+    // Sync stored the whole message: an open server search no longer owns it (closing it
+    // mustn't delete it). A partial update (a read flag changing) only touches the row.
+    if m.received_at.is_some() {
+        conn.execute(
+            "UPDATE search_cache SET added = 0
+             WHERE added = 1 AND message_id = (SELECT id FROM messages WHERE account_id = ?1 AND remote_id = ?2)",
+            params![account_id, m.remote_id],
+        )?;
+    }
     Ok(())
 }
 
@@ -511,9 +528,73 @@ pub fn delete_message_in_folder(conn: &Connection, account_id: i64, folder_id: i
     Ok(())
 }
 
-/// Drops cached messages older than the configured window.
+/// Drops cached messages older than the configured window (not ones an open server search
+/// found: see `search_cache`).
 pub fn prune_older_than(conn: &Connection, folder_id: i64, cutoff_iso: &str) -> Result<usize> {
-    Ok(conn.execute("DELETE FROM messages WHERE folder_id = ?1 AND received_at < ?2", params![folder_id, cutoff_iso])?)
+    Ok(conn.execute(
+        "DELETE FROM messages WHERE folder_id = ?1 AND received_at < ?2 AND id NOT IN (SELECT message_id FROM search_cache)",
+        params![folder_id, cutoff_iso],
+    )?)
+}
+
+// ---------- server search ----------
+
+/// Keeps a message the server search returned (`hit`) or that belongs to a conversation
+/// opened from its results. Mail that's already cached is left as sync has it; anything
+/// new goes into `folder_id` and is marked as added, so `clear_search_cache` drops it again.
+pub fn keep_search_result(conn: &Connection, account_id: i64, folder_id: i64, m: &MessageUpsert, hit: bool) -> Result<()> {
+    let known: Option<i64> = conn
+        .query_row("SELECT id FROM messages WHERE account_id = ?1 AND remote_id = ?2", params![account_id, m.remote_id], |r| r.get(0))
+        .optional()?;
+    let (id, added) = match known {
+        Some(id) => (id, false),
+        None => {
+            if m.received_at.is_none() {
+                return Ok(());
+            }
+            upsert_message(conn, account_id, folder_id, m)?;
+            let id = conn.query_row("SELECT id FROM messages WHERE account_id = ?1 AND remote_id = ?2", params![account_id, m.remote_id], |r| r.get(0))?;
+            (id, true)
+        }
+    };
+    conn.execute(
+        "INSERT INTO search_cache (message_id, hit, added) VALUES (?1, ?2, ?3)
+         ON CONFLICT (message_id) DO UPDATE SET hit = MAX(hit, excluded.hit)",
+        params![id, hit, added],
+    )?;
+    Ok(())
+}
+
+/// Whether a conversation holds mail an open server search added (so the rest of it may
+/// be on the server only).
+pub fn has_added_search_mail(conn: &Connection, account_id: i64, conversation_id: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM search_cache s JOIN messages m ON m.id = s.message_id
+             WHERE m.account_id = ?1 AND m.conversation_id = ?2 AND s.added = 1 LIMIT 1",
+            params![account_id, conversation_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// Ends a server search: what it added leaves the cache again (snoozed mail stays, its
+/// snooze needs it) and the rest goes back to normal pruning. Returns how many messages went.
+pub fn clear_search_cache(conn: &Connection) -> Result<usize> {
+    // These are usually the newest rows: keep their ids from being handed out again.
+    let top: i64 = conn.query_row("SELECT COALESCE(MAX(id), 0) FROM messages", [], |r| r.get(0))?;
+    let floor: i64 = get_setting(conn, KEY_MESSAGE_ID_FLOOR)?.and_then(|v| v.parse().ok()).unwrap_or(0);
+    if top > floor {
+        set_setting(conn, KEY_MESSAGE_ID_FLOOR, &top.to_string())?;
+    }
+    let n = conn.execute(
+        "DELETE FROM messages WHERE id IN (SELECT message_id FROM search_cache WHERE added = 1)
+           AND folder_id NOT IN (SELECT id FROM folders WHERE role = 'snoozed')",
+        [],
+    )?;
+    conn.execute("DELETE FROM search_cache", [])?;
+    Ok(n)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1265,6 +1346,90 @@ mod tests {
             let page2 = list_threads(c, Scope::Folder(f), &crate::query::compile(""), Some(&cur), 10)?;
             assert_eq!(page2.len(), 1);
             assert_eq!(page2[0].conversation_id, "c2");
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn server_search_results_survive_the_prune_until_the_search_closes() {
+        let (db, a, f) = seed();
+        db.with(|c| {
+            // m1 is cached; the server search finds it and m2 (older than the window), and
+            // opening m2's conversation brings m3.
+            upsert_message(c, a, f, &msg("m1", "c1", "2026-10-01T10:00:00Z", true))?;
+            keep_search_result(c, a, f, &msg("m1", "c1", "2026-10-01T10:00:00Z", true), true)?;
+            keep_search_result(c, a, f, &msg("m2", "c2", "2025-01-01T10:00:00Z", true), true)?;
+            keep_search_result(c, a, f, &msg("m3", "c2", "2025-01-02T10:00:00Z", true), false)?;
+            assert!(has_added_search_mail(c, a, "c2")?);
+            assert!(!has_added_search_mail(c, a, "c1")?, "c1 was all cached already");
+
+            // Sync's prune leaves them alone while the search is open.
+            assert_eq!(prune_older_than(c, f, "2026-09-01T00:00:00Z")?, 0);
+
+            // Results are the hits (local matches or not), not the rest of their conversation.
+            let hits = crate::query::with_server_hits(crate::query::compile("nomatch"), "nomatch");
+            let rows = list_threads(c, Scope::AllMail, &hits, None, 10)?;
+            let convs: Vec<&str> = rows.iter().map(|t| t.conversation_id.as_str()).collect();
+            assert_eq!(convs, ["c1", "c2"]);
+            assert_eq!(rows[1].message_count, 1, "m3 is in c2's conversation but not a hit");
+            assert_eq!(get_thread(c, a, "c2", false)?.len(), 2, "the reader shows the whole conversation");
+
+            // Closing the search drops what it added and keeps what was cached.
+            assert_eq!(clear_search_cache(c)?, 2);
+            let left: Vec<String> = c.prepare("SELECT remote_id FROM messages")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            assert_eq!(left, ["m1"]);
+            assert_eq!(c.query_row("SELECT COUNT(*) FROM search_cache", [], |r| r.get::<_, i64>(0))?, 0);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn ids_freed_by_closing_a_search_are_never_handed_out_again() {
+        let (db, a, f) = seed();
+        db.with(|c| {
+            upsert_message(c, a, f, &msg("m1", "c1", "2026-10-01T10:00:00Z", true))?;
+            keep_search_result(c, a, f, &msg("old", "c2", "2025-01-01T10:00:00Z", true), true)?;
+            let freed: i64 = c.query_row("SELECT id FROM messages WHERE remote_id = 'old'", [], |r| r.get(0))?;
+            clear_search_cache(c)?;
+            // A draft replying to the search result still holds `freed`: new mail mustn't take it.
+            upsert_message(c, a, f, &msg("new", "c3", "2026-10-02T10:00:00Z", false))?;
+            let id: i64 = c.query_row("SELECT id FROM messages WHERE remote_id = 'new'", [], |r| r.get(0))?;
+            assert!(id > freed, "{id} must be above the freed {freed}");
+            assert!(message_remote(c, freed)?.is_none(), "the draft finds its original gone, not another message");
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn mail_sync_stores_is_not_dropped_when_the_search_closes() {
+        let (db, a, f) = seed();
+        db.with(|c| {
+            // The search found it before sync did (first sync, or a message just arriving).
+            keep_search_result(c, a, f, &msg("m1", "c1", "2026-10-01T10:00:00Z", false), true)?;
+            upsert_message(c, a, f, &msg("m1", "c1", "2026-10-01T10:00:00Z", false))?;
+            assert_eq!(clear_search_cache(c)?, 0);
+            assert_eq!(c.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get::<_, i64>(0))?, 1);
+
+            // A partial update (opening it marked it read) isn't sync storing it.
+            keep_search_result(c, a, f, &msg("m2", "c2", "2025-01-01T10:00:00Z", false), true)?;
+            upsert_message(c, a, f, &MessageUpsert { remote_id: "m2".into(), is_read: Some(true), ..Default::default() })?;
+            assert_eq!(clear_search_cache(c)?, 1);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_snoozed_search_result_stays_when_the_search_closes() {
+        let (db, a, f) = seed();
+        db.with(|c| {
+            keep_search_result(c, a, f, &msg("m1", "c1", "2025-01-01T10:00:00Z", true), true)?;
+            let snoozed = ensure_local_folder(c, a, crate::actions::SNOOZED_ROLE, "Snoozed")?.id;
+            c.execute("UPDATE messages SET folder_id = ?1", [snoozed])?;
+            assert_eq!(clear_search_cache(c)?, 0);
             Ok(())
         })
         .unwrap();

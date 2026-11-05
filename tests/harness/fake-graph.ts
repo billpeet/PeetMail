@@ -578,6 +578,22 @@ export async function startFakeGraph({ port = 0, mailbox, count, seed, verbose =
       return reply(200, { value });
     }
 
+    // The whole mailbox: $search (KQL) or a conversation ($filter=conversationId eq '...').
+    if (p === "/me/messages" && method === "GET") {
+      const search = url.searchParams.get("$search");
+      const filter = url.searchParams.get("$filter") ?? "";
+      const conversation = filter.match(/^conversationId eq '((?:[^']|'')*)'$/)?.[1]?.replace(/''/g, "'");
+      if (!search && conversation === undefined) return graphError(reply, 400, "BadRequest", "Only $search or a conversationId $filter is supported here");
+      const matches = search ? kqlMatcher(search) : (msg: GraphMessage) => msg.conversationId === conversation;
+      const top = Number(url.searchParams.get("$top") ?? 10);
+      const value = [...state.messages.values()]
+        .filter(matches)
+        .sort((a, b) => b.receivedDateTime.localeCompare(a.receivedDateTime))
+        .slice(0, top)
+        .map(metadata);
+      return reply(200, { value });
+    }
+
     const m = p.match(/^\/me\/messages\/([^/]+)$/);
     if (m) {
       const msg = state.messages.get(decodeURIComponent(m[1]));
@@ -607,6 +623,30 @@ export async function startFakeGraph({ port = 0, mailbox, count, seed, verbose =
       return reply(200, { id: msg.id, body: msg.body });
     }
     graphError(reply, 404, "NotFound", `No fake route for ${method} ${p}`);
+  }
+
+  /**
+   * A small KQL subset, as PeetMail sends it: terms joined by AND, NOT before a term,
+   * from: recipients: subject: hasAttachments:true, words and "phrases" (anywhere in the
+   * subject, sender, preview or body).
+   */
+  function kqlMatcher(param: string): (m: GraphMessage) => boolean {
+    const kql = param.replace(/^"|"$/g, "").replace(/\\"/g, '"');
+    const terms = [...kql.matchAll(/(NOT\s+)?(?:(\w+):)?("[^"]*"|\S+)/g)]
+      .filter((t) => t[0] !== "AND")
+      .map((t) => ({ not: !!t[1], key: t[2]?.toLowerCase(), value: t[3].replace(/^"|"$/g, "").toLowerCase() }));
+    const people = (list: GraphMessage["toRecipients"]) => list.map((r) => `${r.emailAddress.name} ${r.emailAddress.address}`).join(" ");
+    return (m) =>
+      terms.every((t) => {
+        const from = `${m.from.emailAddress.name} ${m.from.emailAddress.address}`;
+        const hit =
+          t.key === "from" ? from.toLowerCase().includes(t.value)
+          : t.key === "recipients" ? people([...m.toRecipients, ...m.ccRecipients]).toLowerCase().includes(t.value)
+          : t.key === "subject" ? m.subject.toLowerCase().includes(t.value)
+          : t.key === "hasattachments" ? m.hasAttachments === (t.value === "true")
+          : [m.subject, from, m.bodyPreview, m.body.content].join(" ").toLowerCase().includes(t.value);
+        return hit !== t.not;
+      });
   }
 
   /** Accepts a well-known name or a folder id. */
@@ -931,7 +971,7 @@ export async function startFakeGraph({ port = 0, mailbox, count, seed, verbose =
         return ok({
           routes: [
             "POST /_test/reset {count?, seed?}",
-            "POST /_test/deliver {count?, subject?, from?: [name, address], to?: [[name, address]], cc?, conversationId?, body?: html, folder?, inference?, attachments?: [{name, contentType?, text}]}",
+            "POST /_test/deliver {count?, subject?, receivedAt?: ISO, from?: [name, address], to?: [[name, address]], cc?, conversationId?, body?: html, folder?, inference?, attachments?: [{name, contentType?, text}]}",
             "POST /_test/update {id, fields: {isRead?, flag?, subject?...}}",
             "POST /_test/remove {id}",
             "POST /_test/draft {subject?, html?, to?: [address], bcc?, attachments?: [{name, text}]}   POST /_test/draft-update {id, subject?, html?}   POST /_test/draft-remove {id}",
@@ -960,7 +1000,8 @@ export async function startFakeGraph({ port = 0, mailbox, count, seed, verbose =
             conversationId: body.conversationId,
             sender: (body.from as Sender | undefined) ?? ["Sam Carter", "sam.carter@contoso.com"],
             subject: body.subject ?? `New message ${delivered}`,
-            receivedAt: Date.now(),
+            // An ISO date, for mail from before the cache window.
+            receivedAt: body.receivedAt ? Date.parse(body.receivedAt) : Date.now(),
             snippet: body.preview ?? "Just landed in your inbox.",
             folder: body.folder,
             to: body.to as Sender[] | undefined,

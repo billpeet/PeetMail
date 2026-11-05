@@ -107,6 +107,11 @@
   }
 
   function searchKeys(e: KeyboardEvent) {
+    // Ctrl+Enter searches the server (a keymap binding) and, like Enter, moves to the results.
+    if (e.key === "Enter" && e.ctrlKey) {
+      searchInput?.blur();
+      return;
+    }
     if (e.key === "Enter" || e.key === "ArrowDown") {
       e.preventDefault();
       searchInput?.blur();
@@ -171,6 +176,7 @@
       { id: "section.mail", keys: "1", label: "Mail", group: "Go to", when: base, run: () => mail.showMail() },
       { id: "section.calendar", keys: "2", label: "Calendar", group: "Go to", when: base, run: () => (mail.view = "calendar") },
       { id: "search", keys: "/", label: "Search", group: "Go to", when: base, run: focusSearch },
+      { id: "search.server", keys: "ctrl+Enter", label: "Search the server", group: "Go to", when: () => inThreads() && mail.canSearchServer, run: () => mail.searchServer() },
       { id: "calendar.new", keys: "C", label: "New event", group: "Calendar", when: base, run: () => (mail.overlay = "quickadd") },
       { id: "calendar.prev", keys: "ArrowLeft", label: "Previous week", group: "Calendar", when: inCalendar, run: () => calendar.shiftWeek(-1) },
       { id: "calendar.next", keys: "ArrowRight", label: "Next week", group: "Calendar", when: inCalendar, run: () => calendar.shiftWeek(1) },

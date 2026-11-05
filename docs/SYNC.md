@@ -58,7 +58,7 @@ Diagnostics (`support.rs`) show settings keys containing `:` as a count per pref
 
 ### On the client
 
-Migration `0016_settings_sync.sql` adds:
+Migration `0017_settings_sync.sql` adds:
 
 ```sql
 CREATE TABLE sync_items (

@@ -15,6 +15,7 @@ Unreleased into that version's section when cutting a stable release.
 - Your settings can follow you between PCs: splits, snippets, signatures and preferences sync through a server you or your organisation runs, encrypted on your PC first so the server can't read them. Turn it on under **Settings → Sync**; see Help (**F1**) → Syncing settings.
 - Act on several conversations at once: **x** selects one, **Shift+J** / **Shift+K** select as you move, and **Ctrl+A** selects everything in the view. **e**, **#**, **u**, **s** and **h** then archive, delete, mark read, flag or snooze them all, and one **z** undoes the lot. **Esc** clears the selection. With the mouse, Ctrl+click and Shift+click.
 - Undo now always reverses an action on the server too. Before, pressing **z** soon after another change could leave the undone action in place in Outlook or Gmail and drop that other change.
+- Search older mail: in a search, **Ctrl+Enter** (or **Search the server for older mail** under the results) asks Microsoft or Gmail for matches from before your mail window. They show among the other results and open, reply and file like any mail, without filling up your PC.
 - PeetMail runs on Linux: download the AppImage from the releases page, and it works on Ubuntu, Debian, Fedora, Arch and other mainstream distributions, and updates itself like the Windows version. Saved sign-ins are kept encrypted with your desktop's keyring. See Help → Getting started.
 
 ## 0.2.0 — 2026-10-30
