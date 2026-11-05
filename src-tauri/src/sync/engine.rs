@@ -424,6 +424,7 @@ mod tests {
 
     #[test]
     fn the_secret_is_kept_sealed_and_read_back() {
+        crate::secure::init_for_tests();
         with_db(|c| {
             let j = Joined { server: Url::parse("https://sync.example.com/").unwrap(), device_id: 3, device_token: "pmd_secret".into(), key: MasterKey::generate() };
             save_joined(c, &j)?;
