@@ -40,9 +40,11 @@ Everything has a keyboard shortcut. The ones to start with:
 | **Enter** / **Esc** | Open / back to the list |
 | **e** | Archive (mark done) |
 | **#** | Delete |
+| **!** | Spam (in Junk: not spam) |
 | **g i** / **g e** / **g t** | Inbox / Done / Sent |
 | **g h** / **g s** | Snoozed / Scheduled |
 | **g a** / **g #** | All mail / Trash |
+| **g !** | Junk |
 | **r** / **a** / **f** | Reply / reply all / forward |
 | **c** | Write a new message (**Ctrl+Enter** sends) |
 | **g d** | Drafts |
@@ -56,7 +58,9 @@ Everything has a keyboard shortcut. The ones to start with:
 
 The mouse works too, everywhere.
 
-The icons down the left side are your mailboxes: Inbox, Done (what you've archived), Sent, Snoozed, Scheduled, All mail and Trash, each covering all your accounts. In Done, **e** puts a conversation back in the inbox; in Trash, **#** restores it. Snoozed lists conversations by when they come back (**h** changes the time, **u** brings one back now), and Scheduled lists messages waiting to send (**Enter** edits one, **#** cancels it). Mail is kept for your mail window (**Settings → Storage**), so older mail isn't in these lists.
+The icons down the left side are your mailboxes: Inbox, Done (what you've archived), Sent, Snoozed, Scheduled, All mail, Junk and Trash, each covering all your accounts. In Done, **e** puts a conversation back in the inbox; in Trash, **#** restores it. Snoozed lists conversations by when they come back (**h** changes the time, **u** brings one back now), and Scheduled lists messages waiting to send (**Enter** edits one, **#** cancels it). Mail is kept for your mail window (**Settings → Storage**), so older mail isn't in these lists.
+
+**!** moves a conversation to Junk; in Gmail that's the same as Report spam. Check Junk (**g !**) now and then for real mail caught by mistake: **!** or **e** there marks it as not spam and moves it back to your inbox. Junk mail stays out of All mail and search.
 
 Search (**/**) looks through the mail on your PC as you type: words, `from:`, `to:`, `subject:`, `is:unread`, `has:attachment` and the rest. For anything older than your mail window, press **Ctrl+Enter** (or **Search the server for older mail** under the results) and PeetMail asks Microsoft or Gmail too, showing the newest 100 matches from each account among the others. You can open, reply to and file them like any mail. They aren't kept: closing the search lets them go again.
 

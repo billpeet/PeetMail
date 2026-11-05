@@ -4,7 +4,7 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::db::{self, MessageState};
+use crate::db::{self, MessageState, JUNK_ROLE};
 use crate::error::Result;
 use crate::outbox::{self, Op, GRACE};
 
@@ -16,10 +16,14 @@ type LocalChange = Box<dyn Fn(&Connection, &MessageState) -> Result<()>>;
 pub enum Action {
     /// Inbox (and snoozed) mail to Archive (Done).
     Archive,
-    /// Inbox, snoozed and archived mail to Deleted Items.
+    /// Inbox, snoozed, archived and junk mail to Deleted Items.
     Trash,
     /// Archived and deleted mail back to the inbox ("not done", restore from Trash).
     MoveToInbox,
+    /// Inbox, snoozed and archived mail to Junk (Gmail: reported as spam).
+    Spam,
+    /// Junk back to the inbox.
+    NotSpam,
     MarkRead,
     MarkUnread,
     Flag,
@@ -32,6 +36,8 @@ impl Action {
             Action::Archive => "Archived",
             Action::Trash => "Deleted",
             Action::MoveToInbox => "Moved to Inbox",
+            Action::Spam => "Marked as spam",
+            Action::NotSpam => "Not spam: moved to Inbox",
             Action::MarkRead => "Marked as read",
             Action::MarkUnread => "Marked as unread",
             Action::Flag => "Flagged",
@@ -241,8 +247,10 @@ fn apply_in(tx: &Connection, account_id: i64, conversation_id: &str, action: Act
         // Snoozed mail too, so e and # work in the Snoozed view. Its snooze stays: undo puts
         // it back in Snoozed, and waking only moves what's still there.
         Action::Archive => Some((&["inbox", SNOOZED_ROLE], ("archive", "Archive"))),
-        Action::Trash => Some((&["inbox", SNOOZED_ROLE, "archive"], ("deleteditems", "Deleted Items"))),
+        Action::Trash => Some((&["inbox", SNOOZED_ROLE, "archive", JUNK_ROLE], ("deleteditems", "Deleted Items"))),
         Action::MoveToInbox => Some((&["archive", "deleteditems"], ("inbox", "Inbox"))),
+        Action::Spam => Some((&["inbox", SNOOZED_ROLE, "archive"], (JUNK_ROLE, "Junk Email"))),
+        Action::NotSpam => Some((&[JUNK_ROLE], ("inbox", "Inbox"))),
         _ => None,
     };
     if let Some((from, (to, name))) = moves {
@@ -272,7 +280,7 @@ fn apply_in(tx: &Connection, account_id: i64, conversation_id: &str, action: Act
     // Which messages the action touches, and what it does to each.
     let (targets, local, remote, inverse): (Vec<MessageState>, LocalChange, Op, Op) =
         match action {
-            Action::Archive | Action::Trash | Action::MoveToInbox => unreachable!("moves are handled above"),
+            Action::Archive | Action::Trash | Action::MoveToInbox | Action::Spam | Action::NotSpam => unreachable!("moves are handled above"),
             Action::MarkRead => (
                 all.iter().filter(|m| !m.is_read).cloned().collect(),
                 Box::new(|c, m| db::set_read(c, m.id, true)),
@@ -445,6 +453,42 @@ mod tests {
             assert!(done.ops.iter().all(|(_, _, op)| serde_json::to_string(op).unwrap().contains(SNOOZE_DEST)));
             undo(c, &done)?;
             assert_eq!((mailbox(c, db::Mailbox::Snoozed), mailbox(c, db::Mailbox::Done)), (1, 0));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn spam_goes_to_junk_and_not_spam_brings_it_back() {
+        let (db, a, _) = seed();
+        let mailbox = |c: &Connection, m: db::Mailbox| db::list_threads(c, m.scope(), &crate::query::compile(""), None, 10).unwrap().len();
+        let undo_ops = |e: &UndoEntry| e.ops.iter().map(|(_, _, op)| serde_json::to_string(op).unwrap()).collect::<Vec<_>>();
+        db.with(|c| {
+            let spam = apply(c, a, "c1", Action::Spam)?;
+            assert_eq!((spam.before.len(), spam.label.as_str()), (3, "Marked as spam"));
+            assert_eq!((mailbox(c, db::Mailbox::Inbox), mailbox(c, db::Mailbox::Junk), mailbox(c, db::Mailbox::All)), (0, 1, 0));
+            assert!(queued(c).iter().all(|(_, op)| op.contains(r#""destination":"junkemail""#)));
+            // Undo while the moves wait: cancelled, back in the inbox.
+            undo(c, &spam)?;
+            assert_eq!((mailbox(c, db::Mailbox::Inbox), mailbox(c, db::Mailbox::Junk)), (1, 0));
+            assert!(queued(c).is_empty());
+
+            apply(c, a, "c1", Action::Spam)?;
+            c.execute("DELETE FROM outbox", [])?;
+            // Spam has nothing left to move; not spam is the way back.
+            assert!(apply(c, a, "c1", Action::Spam)?.before.is_empty());
+            let back = apply(c, a, "c1", Action::NotSpam)?;
+            assert_eq!(back.before.len(), 3);
+            assert_eq!((mailbox(c, db::Mailbox::Inbox), mailbox(c, db::Mailbox::Junk)), (1, 0));
+            assert!(undo_ops(&back).iter().all(|op| op.contains("\"junkemail\"")), "undoing not spam returns it to Junk");
+            c.execute("DELETE FROM outbox", [])?;
+
+            // Deleting from Junk: to Trash, and its undo goes back to Junk.
+            apply(c, a, "c1", Action::Spam)?;
+            c.execute("DELETE FROM outbox", [])?;
+            let del = apply(c, a, "c1", Action::Trash)?;
+            assert_eq!((mailbox(c, db::Mailbox::Junk), mailbox(c, db::Mailbox::Trash)), (0, 1));
+            assert!(undo_ops(&del).iter().all(|op| op.contains("\"junkemail\"")));
             Ok(())
         })
         .unwrap();

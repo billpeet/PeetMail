@@ -26,6 +26,7 @@ test("a sync with no changes costs one request per synced folder, the calendar a
     "/v1.0/me/mailFolders/AAMkAGI2-sent/messages/delta",
     "/v1.0/me/mailFolders/AAMkAGI2-archive/messages/delta",
     "/v1.0/me/mailFolders/AAMkAGI2-deleted/messages/delta",
+    "/v1.0/me/mailFolders/AAMkAGI2-junk/messages/delta",
     "/v1.0/me/calendarView/delta",
     "/v1.0/me/mailFolders/drafts/messages",
   ]);
@@ -63,20 +64,25 @@ test("mail archived in PeetMail stays in Done once the Archive folder syncs", as
   expect(await folderConversations(page, "inbox")).not.toContain("conv-plain");
 });
 
-test("each mailbox lists its conversations, and Trash's reader shows deleted mail", async ({ inbox: page }) => {
+test("each mailbox lists its conversations, and Trash's and Junk's readers show their mail", async ({ inbox: page }) => {
   const invoke = (cmd: string, args: object) => page.evaluate(([c, a]) => (window as any).__TAURI_INTERNALS__.invoke(c, a), [cmd, args] as const);
   const convs = async (mailbox: string) =>
     ((await invoke("list_threads", { mailbox, query: "", limit: 1000 })) as { conversationId: string }[]).map((t) => t.conversationId);
   await expect.poll(() => convs("done")).toEqual(["conv-archived"]);
   expect(await convs("trash")).toEqual(["conv-deleted"]);
+  expect(await convs("junk")).toEqual(["conv-junk"]);
   expect(await convs("sent")).toContain("conv-sent-0");
   expect(await convs("inbox")).not.toContain("conv-archived");
   const all = await convs("all");
   expect(all).toEqual(expect.arrayContaining(["conv-archived", "conv-plain", "conv-sent-0"]));
   expect(all).not.toContain("conv-deleted");
+  expect(all).not.toContain("conv-junk");
+  expect(await convs("inbox")).not.toContain("conv-junk");
 
   expect(await invoke("get_thread", { accountId: 1, conversationId: "conv-deleted" })).toEqual([]);
-  expect(await invoke("get_thread", { accountId: 1, conversationId: "conv-deleted", withTrash: true })).toHaveLength(1);
+  expect(await invoke("get_thread", { accountId: 1, conversationId: "conv-deleted", from: "trash" })).toHaveLength(1);
+  expect(await invoke("get_thread", { accountId: 1, conversationId: "conv-junk", from: "inbox" })).toEqual([]);
+  expect(await invoke("get_thread", { accountId: 1, conversationId: "conv-junk", from: "junk" })).toHaveLength(1);
 });
 
 test("429 throttling is retried after Retry-After", async ({ inbox: page, fake }) => {

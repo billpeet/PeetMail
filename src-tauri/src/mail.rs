@@ -156,11 +156,17 @@ pub async fn prefetch_bodies(app: AppHandle) {
 }
 
 /// Folders kept in sync, inside the mail window. Sent is synced so threads show your
-/// replies; Archive and Deleted Items back the Done and Trash views.
-const SYNCED_FOLDERS: &[(&str, &str)] = &[("inbox", "Inbox"), ("sentitems", "Sent Items"), ("archive", "Archive"), ("deleteditems", "Deleted Items")];
+/// replies; Archive, Deleted Items and Junk Email back the Done, Trash and Junk views.
+const SYNCED_FOLDERS: &[(&str, &str)] = &[
+    ("inbox", "Inbox"),
+    ("sentitems", "Sent Items"),
+    ("archive", "Archive"),
+    ("deleteditems", "Deleted Items"),
+    ("junkemail", "Junk Email"),
+];
 
 /// Folders a mailbox may not have (some Exchange mailboxes have no Archive): a 404 skips them.
-const OPTIONAL_FOLDERS: &[&str] = &["archive"];
+const OPTIONAL_FOLDERS: &[&str] = &["archive", "junkemail"];
 
 async fn sync_account(app: &AppHandle, state: &AppState, account: &Account) -> Result<()> {
     sync_mail_and_calendar(app, state, account).await?;
