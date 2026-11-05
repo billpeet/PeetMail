@@ -27,6 +27,7 @@ mod rooms;
 mod sanitize;
 mod scrub;
 mod secure;
+mod server_search;
 mod state;
 mod support;
 mod sync;
@@ -293,6 +294,8 @@ pub fn run() {
                 Err(e) => fatal_startup_error(&e.to_string()),
             };
             db.with(|c| outbox::reset_inflight(c))?;
+            // A server search still open when the app closed: what it fetched goes again.
+            db.with(|c| db::clear_search_cache(c))?;
             // Drafts changed here that never reached the server get another go.
             if let Err(e) = db.with(|c| {
                 for (account_id, id) in drafts::unpushed(c)? {
@@ -374,6 +377,9 @@ pub fn run() {
             commands::list_folders,
             commands::list_threads,
             commands::get_thread,
+            commands::search_server,
+            commands::fetch_search_conversation,
+            commands::clear_server_search,
             commands::get_message_body,
             commands::sync_now,
             commands::set_cache_limits,

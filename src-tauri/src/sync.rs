@@ -40,6 +40,8 @@ const LOCAL: &[&str] = &[
     "update_channel",
     "restarted_to_update",
     "fake_autostart",
+    // Message ids are this database's own (db::clear_search_cache).
+    "message_id_floor",
 ];
 
 /// Per-account bookkeeping. Account ids are this device's own, so these could never sync.

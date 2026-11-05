@@ -4,6 +4,7 @@
 //   GET  /gmail/v1/users/me/profile
 //   GET  .../messages?labelIds=&q=after:N in:x -in:x&includeSpamTrash=&maxResults=&pageToken=
 //   GET  .../messages/{id}?format=metadata|full
+//   GET  .../threads/{id}?format=metadata
 //   GET  .../messages/{id}/attachments/{attachmentId}
 //   POST .../messages/{id}/modify | trash | untrash
 //   GET  .../history?startHistoryId=     (404 when older than the kept history)
@@ -197,6 +198,30 @@ function payloadOf(m: FakeGmailMessage, format: string): Json {
   return payload;
 }
 
+/**
+ * Gmail search beyond the in:/after: terms sync uses, as PeetMail's server search sends
+ * it: from: subject: {to:x cc:x} is:unread|read|starred has:attachment, words and
+ * "phrases" (anywhere in the subject, sender, snippet or text), `-` to negate.
+ */
+function searchMatcher(q: string): (m: FakeGmailMessage) => boolean {
+  const rest = q.replace(/-?in:\w+/g, "").replace(/after:\d+/g, "");
+  const terms = [...rest.matchAll(/(-?)(\{[^}]*\}|(?:(\w+):)?("[^"]*"|\S+))/g)].map((t) => {
+    const group = t[2].startsWith("{");
+    return { not: t[1] === "-", key: group ? "to" : t[3]?.toLowerCase(), value: (group ? t[2].match(/to:(\S+)/)?.[1] ?? "" : t[4]).replace(/^"|"$/g, "").toLowerCase() };
+  });
+  return (m) =>
+    terms.every((t) => {
+      const hit =
+        t.key === "from" ? m.from.toLowerCase().includes(t.value)
+        : t.key === "to" ? `${m.to} ${m.cc ?? ""}`.toLowerCase().includes(t.value)
+        : t.key === "subject" ? m.subject.toLowerCase().includes(t.value)
+        : t.key === "is" ? (t.value === "unread" ? m.labelIds.includes("UNREAD") : t.value === "read" ? !m.labelIds.includes("UNREAD") : m.labelIds.includes("STARRED"))
+        : t.key === "has" ? !!m.attachments?.length
+        : [m.subject, m.from, m.snippet, m.text ?? "", m.html ?? ""].join(" ").toLowerCase().includes(t.value);
+      return hit !== t.not;
+    });
+}
+
 /** A message as the app wrote it (raw RFC 2822), as the fake stores messages. */
 function fromRaw(raw: string, id: string, threadId: string, labelIds: string[]): FakeGmailMessage {
   const mime = parseMime(raw);
@@ -260,7 +285,7 @@ export async function startFakeGmail({ mailbox, extra = 0 }: { mailbox?: FakeGma
     minSyncToken: 0,
     /** false: the token lacks calendar access (an account that signed in before the scope). */
     grantCalendar: true,
-    requests: [] as { method: string; path: string; status: number }[],
+    requests: [] as { method: string; path: string; query: string; status: number }[],
     /** Writes the app made (modify, trash, label creation). */
     sent: [] as Json[],
     /** draft id -> its message id (which changes on every update, like Gmail's). */
@@ -322,7 +347,7 @@ export async function startFakeGmail({ mailbox, extra = 0 }: { mailbox?: FakeGma
     const p = url.pathname;
     const method = req.method ?? "GET";
     const reply = (status: number, body: unknown, headers?: Record<string, string>) => {
-      if (!p.startsWith("/_test")) state.requests.push({ method, path: p, status });
+      if (!p.startsWith("/_test")) state.requests.push({ method, path: p, query: url.search, status });
       send(res, status, body, headers);
     };
 
@@ -410,6 +435,7 @@ export async function startFakeGmail({ mailbox, extra = 0 }: { mailbox?: FakeGma
       const all = [...state.messages.values()]
         .filter((m) => (!label || m.labelIds.includes(label)) && m.internalDate > after)
         .filter((m) => terms.every((t) => m.labelIds.includes(t.label) !== t.not))
+        .filter(searchMatcher(q))
         .filter((m) => spamTrash || !m.labelIds.some((l) => l === "SPAM" || l === "TRASH"))
         .sort((a, b) => b.internalDate - a.internalDate);
       const start = Number(url.searchParams.get("pageToken") ?? 0);
@@ -422,6 +448,12 @@ export async function startFakeGmail({ mailbox, extra = 0 }: { mailbox?: FakeGma
     }
 
     let m: RegExpMatchArray | null;
+    if ((m = rest.match(/^\/threads\/([^/]+)$/)) && method === "GET") {
+      const id = decodeURIComponent(m[1]);
+      const messages = [...state.messages.values()].filter((x) => x.threadId === id).sort((a, b) => a.internalDate - b.internalDate);
+      if (!messages.length) return reply(404, err(404, "Requested entity was not found."));
+      return reply(200, { id, messages: messages.map((x) => resource(x, url.searchParams.get("format") ?? "full")) });
+    }
     if ((m = rest.match(/^\/messages\/([^/]+)$/)) && method === "GET") {
       if ((state.config.failIds[m[1]] ?? 0) > 0) {
         state.config.failIds[m[1]]--;
@@ -621,7 +653,7 @@ export async function startFakeGmail({ mailbox, extra = 0 }: { mailbox?: FakeGma
       case "deliver": {
         const id = b.id ?? `g-new-${++delivered}`;
         const msg: FakeGmailMessage = {
-          id, threadId: b.threadId ?? `g-thread-new-${delivered}`, labelIds: b.labelIds ?? ["INBOX", "UNREAD", "CATEGORY_PERSONAL"], internalDate: Date.now(),
+          id, threadId: b.threadId ?? `g-thread-new-${delivered}`, labelIds: b.labelIds ?? ["INBOX", "UNREAD", "CATEGORY_PERSONAL"], internalDate: b.internalDate ?? Date.now(),
           from: b.from ?? "Kim Park <kim@friends.example>", to: GMAIL_ACCOUNT.email, subject: b.subject ?? `New ${delivered}`, snippet: b.snippet ?? "Just arrived", text: b.text ?? "Just arrived",
           ...(b.attachmentBytes ? { attachments: [{ filename: "big.bin", mimeType: "application/octet-stream", data: Buffer.alloc(b.attachmentBytes, 7) }] } : {}),
         };

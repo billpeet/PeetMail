@@ -8,7 +8,8 @@
 
   /** In Snoozed, rows show when they come back instead of when they arrived. */
   const until = (t: ThreadRow): string | null => ("until" in t && typeof t.until === "string" ? t.until : null);
-  import { AlarmClock, Archive, Check, Flag, Mail, MailOpen, Paperclip, Trash2 } from "@lucide/svelte";
+  import { AlarmClock, Archive, Check, Cloud, Flag, LoaderCircle, Mail, MailOpen, Paperclip, Trash2 } from "@lucide/svelte";
+  import { count } from "#lib/format.js";
 
   // One line per row in the list layout; three (sender + date, subject, preview) in the
   // narrower preview layout, like Outlook.
@@ -52,10 +53,27 @@
   {#if t.draftId !== undefined}<span data-testid="draft-label" class="text-red-400">Draft</span> {t.draftTo || "(no recipients)"}{:else}{senderName(t.fromName, t.fromAddress)}{/if}
 {/snippet}
 
+<!-- Under search results once they've all loaded: search the server for older mail. -->
+{#snippet serverSearch()}
+  {#if mail.search?.trim() && mail.listComplete}
+    <div data-testid="server-search" data-state={mail.canSearchServer ? "offer" : mail.server?.state} class="flex items-center justify-center gap-2 px-5 py-3 text-sm text-ink-500">
+      {#if mail.canSearchServer}
+        <button data-testid="server-search-run" onclick={() => mail.searchServer()} class="flex items-center gap-2 rounded-md px-3 py-1.5 text-ink-300 hover:bg-ink-900 hover:text-ink-100">
+          <Cloud size={15} /> Search the server for older mail <span class="text-ink-500"><kbd>Ctrl</kbd> <kbd>Enter</kbd></span>
+        </button>
+      {:else if mail.server?.state === "searching"}
+        <LoaderCircle size={15} class="animate-spin" /> Searching the server…
+      {:else if mail.server}
+        <Cloud size={15} /> <span data-testid="server-search-found">{count(mail.server.found, "message")} found on the server</span>
+      {/if}
+    </div>
+  {/if}
+{/snippet}
+
 <div bind:this={viewport} bind:clientHeight={height} onscroll={onScroll} data-testid="thread-list" class="h-full overflow-y-auto">
   {#if mail.threads.length === 0}
-    <div data-testid="thread-list-empty" class="grid h-full place-items-center text-sm text-ink-500">
-      {#if mail.search !== null}No matches.
+    <div data-testid="thread-list-empty" class="grid h-full place-content-center justify-items-center gap-2 text-sm text-ink-500">
+      {#if mail.search !== null}No matches.{@render serverSearch()}
       {:else if mail.sync.state === "syncing"}Syncing your mail…
       {:else}{({ inbox: "Inbox zero.", done: "Nothing archived yet.", sent: "Nothing sent yet.", snoozed: "Nothing snoozed. Press h on a conversation to snooze it.", scheduled: "", drafts: "", all: "No mail.", trash: "Trash is empty." })[mail.mailbox]}
       {/if}
@@ -154,5 +172,6 @@
         </div>
       {/each}
     </div>
+    {@render serverSearch()}
   {/if}
 </div>

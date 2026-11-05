@@ -72,6 +72,9 @@ test.describe("with a telemetry collector", () => {
       })
       .toBe(true);
     const found = Number((await page.getByTestId("thread-count").textContent())!.split(" ")[0]);
+    // And on the server, whose request carries the words in its URL.
+    await page.getByTestId("search-input").press("Control+Enter");
+    await expect(page.getByTestId("server-search-found")).toBeVisible();
     await page.keyboard.press("Escape");
 
     // Send.
@@ -88,7 +91,7 @@ test.describe("with a telemetry collector", () => {
 
     const names = () => new Set(telemetry.spans().map((s) => s.name));
     await flushed(page, telemetry, () =>
-      ["sync.run", "sync.account", "sync.folder", "http.request", "search.query", "ui.action", "body.fetch"].every((n) => names().has(n)) &&
+      ["sync.run", "sync.account", "sync.folder", "http.request", "search.query", "search.server", "ui.action", "body.fetch"].every((n) => names().has(n)) &&
       telemetry.spans().some((s) => s.name === "outbox.op" && s.attrs["peetmail.op"] === "send"),
     );
     const spans = telemetry.spans();
@@ -108,6 +111,8 @@ test.describe("with a telemetry collector", () => {
       "peetmail.search.operators": 1,
       "peetmail.results": found,
     });
+    expect(spans.find((s) => s.name === "search.server")?.attrs).toMatchObject({ "peetmail.search.terms": 1, "peetmail.search.operators": 1, "peetmail.outcome": "ok" });
+    expect(spans.find((s) => s.name === "http.request" && s.attrs["url.template"] === "/v1.0/me/messages")).toBeTruthy();
     // Keyboard actions by binding id.
     expect(spans.filter((s) => s.name === "ui.action").map((s) => s.attrs["peetmail.binding"])).toEqual(expect.arrayContaining(["list.open", "triage.archive"]));
 

@@ -12,7 +12,7 @@ use crate::error::{AppError, Result};
 use crate::outbox::{self, Draft, DraftKind, Op, OutboxStatus};
 use crate::items;
 use crate::state::{AppState, CacheLimits, Preferences, KEY_BODY_CACHE_MB, KEY_CACHE_DAYS, KEY_CLIENT_ID};
-use crate::{auth, mail, query};
+use crate::{auth, mail, query, server_search};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -225,6 +225,7 @@ pub fn list_threads(
     cursor: Option<Cursor>,
     limit: Option<i64>,
     hidden: Option<Vec<i64>>,
+    with_server: Option<bool>,
 ) -> Result<Vec<ThreadRow>> {
     let limit = limit.unwrap_or(200).clamp(1, 1000);
     let started = std::time::Instant::now();
@@ -233,6 +234,11 @@ pub fn list_threads(
     let filter = match split {
         Some(tab) => query::split_filter(&split_queries(&state)?, tab),
         None => query::compile(query.as_deref().unwrap_or("")),
+    };
+    // A search with server results: those join the local matches.
+    let filter = match (searching, with_server) {
+        (true, Some(true)) => query::with_server_hits(filter, query.as_deref().unwrap_or("")),
+        _ => filter,
     };
     // Accounts toggled off in the footer.
     let filter = query::exclude_accounts(filter, hidden.as_deref().unwrap_or_default());
@@ -251,6 +257,28 @@ pub fn list_threads(
         record_ms("search.query", started.elapsed().as_secs_f64() * 1000.0, &attrs[..2]);
     }
     Ok(rows)
+}
+
+/// Searches the server for the query (mail outside the cache window). Results join the
+/// search's list (`list_threads` with `with_server`) until `clear_server_search`.
+#[tauri::command]
+pub async fn search_server(app: AppHandle, state: State<'_, AppState>, query: String, hidden: Option<Vec<i64>>) -> Result<server_search::Outcome> {
+    server_search::search(&app, &state, &query, hidden.as_deref().unwrap_or_default()).await
+}
+
+/// Fetches the rest of a conversation opened from server results. True when anything came.
+#[tauri::command]
+pub async fn fetch_search_conversation(state: State<'_, AppState>, account_id: i64, conversation_id: String) -> Result<bool> {
+    server_search::fetch_conversation(&state, account_id, &conversation_id).await
+}
+
+/// Closes the server search: mail it fetched leaves the cache again.
+#[tauri::command]
+pub fn clear_server_search(app: AppHandle, state: State<'_, AppState>) -> Result<()> {
+    if server_search::clear(&state)? > 0 {
+        let _ = app.emit(mail::EVENT_MAIL_CHANGED, serde_json::json!({ "accountId": null, "folderId": null }));
+    }
+    Ok(())
 }
 
 #[tauri::command]
