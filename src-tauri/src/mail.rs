@@ -372,6 +372,71 @@ pub fn parse_message(v: &Value) -> MessageUpsert {
     }
 }
 
+// ---------- server search ----------
+
+/// Searches the whole mailbox (Graph `$search`, KQL from `query::graph_search`) and keeps
+/// what it finds for the open search. Returns how many messages it found.
+pub async fn search_server(state: &AppState, account_id: i64, kql: &str, limit: usize, generation: u64) -> Result<usize> {
+    let url = Url::parse_with_params(
+        &format!("{}/me/messages", graph::base()),
+        &[
+            ("$search", crate::query::graph_search_param(kql)),
+            ("$top", limit.to_string()),
+            ("$select", format!("{MESSAGE_FIELDS},parentFolderId,isDraft")),
+        ],
+    )
+    .expect("valid url");
+    let page = graph_get(state, account_id, url.as_str(), &[PREFER_IMMUTABLE]).await?;
+    keep_search_results(state, account_id, &page, true, generation)
+}
+
+/// Fetches the rest of a conversation opened from server search results (its other messages
+/// may be outside the cache window too).
+pub async fn fetch_conversation(state: &AppState, account_id: i64, conversation_id: &str, generation: u64) -> Result<usize> {
+    let url = Url::parse_with_params(
+        &format!("{}/me/messages", graph::base()),
+        &[
+            ("$filter", format!("conversationId eq '{}'", conversation_id.replace('\'', "''"))),
+            ("$top", "100".to_string()),
+            ("$select", format!("{MESSAGE_FIELDS},parentFolderId,isDraft")),
+        ],
+    )
+    .expect("valid url");
+    let page = graph_get(state, account_id, url.as_str(), &[PREFER_IMMUTABLE]).await?;
+    keep_search_results(state, account_id, &page, false, generation)
+}
+
+/// Stores search results in the folders they're in: mail in Deleted Items is left out (like
+/// local search) and so are drafts; mail in folders PeetMail doesn't sync counts as archived.
+fn keep_search_results(state: &AppState, account_id: i64, page: &Value, hit: bool, generation: u64) -> Result<usize> {
+    let items = page["value"].as_array().cloned().unwrap_or_default();
+    state.db.with(|c| {
+        // The search closed (or another started) while this was on its way.
+        if !crate::server_search::still_open(generation) {
+            return Ok(0);
+        }
+        let folders = db::list_folders(c, account_id)?;
+        let tx = c.transaction()?;
+        let mut kept = 0;
+        for v in &items {
+            if v["isDraft"].as_bool() == Some(true) {
+                continue;
+            }
+            let parent = v["parentFolderId"].as_str();
+            let folder = folders.iter().find(|f| parent == Some(f.remote_id.as_str()));
+            let folder_id = match folder {
+                Some(f) if f.role.as_deref() == Some("deleteditems") => continue,
+                Some(f) if f.role.is_some() => f.id,
+                _ => db::ensure_local_folder(&tx, account_id, "archive", "Archive")?.id,
+            };
+            db::keep_search_result(&tx, account_id, folder_id, &parse_message(v), hit)?;
+            kept += 1;
+        }
+        tx.commit()?;
+        Ok(kept)
+    })
+}
+
 /// Returns sanitized HTML for a message, from cache or Graph.
 pub async fn message_body(state: &AppState, message_id: i64) -> Result<String> {
     use crate::telemetry::{attr, count, traced, Key};

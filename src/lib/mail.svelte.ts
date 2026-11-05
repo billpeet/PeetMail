@@ -216,6 +216,15 @@ class MailStore {
   );
   /** Active search text; when non-null the list shows search results across all mail. */
   search = $state<string | null>(null);
+  /**
+   * The server search for `query` (Ctrl+Enter, or the row under the results): running, or
+   * done with what it found. Its results join the list while the search text is unchanged.
+   */
+  server = $state<{ query: string; state: "searching" | "done"; found: number } | null>(null);
+  /** The server search fetched mail that must leave the cache when the search closes. */
+  #serverOpen = false;
+  /** Conversations opened from server results whose other messages were fetched already. */
+  #fetchedConversations = new Set<string>();
   /** What the list shows (the sidebar, g i / g e / g t / g h / g s / g a / g #). */
   mailbox = $state<MailView>("inbox");
 
@@ -299,7 +308,7 @@ class MailStore {
    * dropped, so fast Tab presses can't leave one split's mail showing under another's tab.
    */
   #listSeq = 0;
-  #exhausted = false;
+  #exhausted = $state(false);
   #loadingMore: Promise<void> | null = null;
   #refreshTimer: ReturnType<typeof setTimeout> | undefined;
   #prefetchTimer: ReturnType<typeof setTimeout> | undefined;
@@ -388,6 +397,21 @@ class MailStore {
     }
   }
 
+  /** Everything in the list is loaded (no more pages). */
+  get listComplete(): boolean {
+    return this.#exhausted;
+  }
+
+  /** The list includes the server search's results (the search text it ran for is unchanged). */
+  get #withServer(): boolean {
+    return this.search !== null && this.server?.state === "done" && this.server.query === this.search;
+  }
+
+  /** "Search the server" is on offer: there's search text and no server search for it yet. */
+  get canSearchServer(): boolean {
+    return !!this.search?.trim() && this.server?.query !== this.search;
+  }
+
   /** Query and scope behind the current list. */
   get listQuery(): { mailbox: Mailbox | null; query: string; split: number | null } {
     // Search covers all mail.
@@ -445,7 +469,7 @@ class MailStore {
     let cursor: { sortAt: string; messageId: number } | null = null;
     while (out.length < count) {
       const n = Math.min(LIST_MAX, count - out.length);
-      const rows = await api.listThreads(mailbox, query, split, cursor, n, this.hiddenIds);
+      const rows = await api.listThreads(mailbox, query, split, cursor, n, this.hiddenIds, this.#withServer);
       out.push(...rows);
       const last = rows.at(-1);
       if (rows.length < n || !last) break;
@@ -604,7 +628,7 @@ class MailStore {
       if (this.#exhausted || !last) return;
       const seq = this.#listSeq;
       const { mailbox, query, split } = this.listQuery;
-      const rows = await api.listThreads(mailbox, query, split, { sortAt: last.sortAt, messageId: last.messageId }, PAGE, this.hiddenIds);
+      const rows = await api.listThreads(mailbox, query, split, { sortAt: last.sortAt, messageId: last.messageId }, PAGE, this.hiddenIds, this.#withServer);
       if (seq !== this.#listSeq) return; // the list was reloaded meanwhile
       this.#exhausted = rows.length < PAGE;
       this.threads = this.#mergeDrafts([...this.threads, ...rows], this.#exhausted);
@@ -721,6 +745,7 @@ class MailStore {
     this.threadFor = t.conversationId;
     this.#loadInvite();
     this.view = "reader";
+    this.#fetchRestOfConversation(t);
     api.recordOpen(t.accountId, t.conversationId).then(async () => (this.recent = await api.recentOpens()));
     // Opening a conversation reads it, like every mail client; not worth an undo entry.
     if (t.unreadCount > 0) this.act("markRead", { undoable: false, quiet: true });
@@ -753,6 +778,7 @@ class MailStore {
     this.thread = rows;
     this.threadFor = t.conversationId;
     this.#loadInvite();
+    this.#fetchRestOfConversation(t);
     this.#dwellTimer = setTimeout(() => {
       // A selection covers the reading pane: the conversation wasn't on screen.
       if (this.current?.conversationId !== t.conversationId || !this.previewing || this.batching) return;
@@ -773,6 +799,7 @@ class MailStore {
   /** Opens a Recent Opens entry: selects it in the list if it's there, else pins it. */
   async openRecent(r: RecentOpen) {
     this.search = null;
+    this.#closeServerSearch();
     const index = this.threads.findIndex((t) => t.conversationId === r.conversationId && t.accountId === r.accountId);
     if (index >= 0) return this.openAt(index);
     this.pinned = r;
@@ -803,6 +830,7 @@ class MailStore {
   async goTo(mailbox: MailView) {
     this.clearChecked();
     this.search = null;
+    this.#closeServerSearch();
     this.pinned = null;
     if (this.mailbox !== mailbox) {
       // Drop the old list at once: a key pressed before the new one loads (e, #) must not
@@ -820,6 +848,7 @@ class MailStore {
     if (!this.splits.length) return;
     this.search = null;
     this.clearChecked();
+    this.#closeServerSearch();
     this.mailbox = "inbox";
     this.splitIndex = (index + this.splits.length) % this.splits.length;
     this.selected = 0;
@@ -845,6 +874,8 @@ class MailStore {
   setSearch(text: string) {
     this.search = text;
     this.clearChecked();
+    // Other words: back to local results until the server is searched for them.
+    if (this.server && this.server.query !== text) this.server = null;
     clearTimeout(this.#searchTimer);
     this.#searchTimer = setTimeout(() => {
       this.selected = 0;
@@ -856,8 +887,58 @@ class MailStore {
     if (this.search === null) return;
     this.search = null;
     this.clearChecked();
+    this.#closeServerSearch();
     this.selected = 0;
     await this.refresh();
+  }
+
+  /**
+   * Searches the server for the search text (mail outside the cache window). The results
+   * join the list, newest first among the local matches.
+   */
+  async searchServer() {
+    const query = this.search;
+    if (query === null || !query.trim() || this.server?.query === query) return;
+    this.server = { query, state: "searching", found: 0 };
+    this.#serverOpen = true;
+    this.#fetchedConversations.clear();
+    try {
+      const out = await api.searchServer(query, this.hiddenIds);
+      if (this.server?.query !== query || this.search !== query) return;
+      this.server = { query, state: "done", found: out.found };
+      if (out.failed.length) this.showToast({ text: `Couldn't search ${out.failed.join(", ")}`, error: true });
+      await this.refresh();
+    } catch (e) {
+      if (this.server?.query === query) this.server = null;
+      this.showToast({ text: String(e), error: true });
+    }
+  }
+
+  /** The search closed: what the server search fetched leaves the cache. */
+  #closeServerSearch() {
+    this.server = null;
+    this.#fetchedConversations.clear();
+    if (!this.#serverOpen) return;
+    this.#serverOpen = false;
+    api.clearServerSearch().catch(() => {});
+  }
+
+  /**
+   * A conversation opened from server results: its other messages may be outside the cache
+   * window too, so fetch them (once) and show them when they come.
+   */
+  async #fetchRestOfConversation(t: ThreadRow) {
+    const key = `${t.accountId}:${t.conversationId}`;
+    if (!this.#withServer || this.#fetchedConversations.has(key)) return;
+    this.#fetchedConversations.add(key);
+    try {
+      if (!(await api.fetchSearchConversation(t.accountId, t.conversationId))) return;
+      if (this.threadFor !== t.conversationId || this.current?.accountId !== t.accountId) return;
+      this.thread = await api.getThread(t.accountId, t.conversationId, this.#withTrash);
+    } catch {
+      // Offline or the server said no: the messages found still show; try again next open.
+      this.#fetchedConversations.delete(key);
+    }
   }
 
   // ---------- triage ----------
