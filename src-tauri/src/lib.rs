@@ -176,7 +176,9 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
+/// `dev_data`: a dev build gets a WebView profile (localStorage) of its own, apart from the
+/// installed app's.
+fn create_main_window(app: &tauri::App, dev_data: bool) -> tauri::Result<()> {
     let headless = testenv::flag("PEETMAIL_HEADLESS");
     // Started at sign-in (autostart): wait in the tray.
     // A restart to update keeps the old arguments (Linux), but the user just asked for it,
@@ -196,6 +198,9 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     // Tests: WebView2's browser arguments (the DevTools port), set on the window itself.
     // WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS can't be relied on: whether WebView2 lets it
     // override the app's own arguments varies (on CI it never did).
+    if dev_data {
+        builder = builder.data_directory(datadir::dev_dir().join("webview"));
+    }
     if let Some(args) = testenv::get("PEETMAIL_WEBVIEW2_ARGS") {
         builder = builder.additional_browser_args(&args);
     }
@@ -215,7 +220,22 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let started = std::time::Instant::now();
-    let data_dir_override = testenv::get("PEETMAIL_DATA_DIR").map(std::path::PathBuf::from);
+    // A dev build (`pnpm tauri dev`, which loads the Vite server) works on its own copy of
+    // the installed app's data, so its migrations never lock the installed version out.
+    // Test builds embed the frontend and always pass PEETMAIL_DATA_DIR, so they never get here.
+    let dev_build = tauri::is_dev();
+    let mut data_dir_override = testenv::get("PEETMAIL_DATA_DIR").map(std::path::PathBuf::from);
+    let is_test = data_dir_override.is_some();
+    let dev_data = dev_build && !is_test;
+    // Logging isn't up yet: how the copy went is reported in setup.
+    let mut dev_seed = Ok(false);
+    if dev_data {
+        let dev = datadir::dev_dir();
+        if let Some(prod) = datadir::app_data_dir() {
+            dev_seed = datadir::seed_dev(&prod, &dev);
+        }
+        data_dir_override = Some(dev);
+    }
     // First, before Tauri: crash reporting covers startup, and the crash reporter process
     // (this binary run again) stops inside here.
     let roaming_dir = data_dir_override.clone().or_else(datadir::app_data_dir);
@@ -241,10 +261,11 @@ pub fn run() {
     }
 
     // Tests run several copies at once (and alongside the real app), so only a real
-    // install is single-instance: a second launch just shows the running window.
-    let is_test = data_dir_override.is_some();
+    // install is single-instance: a second launch just shows the running window. A dev
+    // build shares the installed app's identifier, so it skips this too (else launching it
+    // would just bring up the installed app).
     let mut builder = tauri::Builder::default();
-    if !is_test {
+    if data_dir_override.is_none() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main_window(app)));
     }
     builder
@@ -292,6 +313,12 @@ pub fn run() {
                     log::warn!("couldn't make the data folder private: {e}");
                 }
             }
+            match &dev_seed {
+                Ok(true) => log::info!("dev build: copied the installed app's database to {}", dir.display()),
+                Ok(false) => {}
+                // Carrying on would start an empty mailbox that every later run keeps.
+                Err(e) => fatal_startup_error(&format!("This dev build couldn't copy the installed app's database to {}: {e}", dir.display())),
+            }
             secure::init(&dir, !is_test);
             let db = match db::Db::open(&dir.join("peetmail.db")) {
                 Ok(db) => db,
@@ -322,7 +349,7 @@ pub fn run() {
             app.manage(state::AppState::new(db));
             update::init(app.handle());
             health::start(app.handle());
-            create_main_window(app)?;
+            create_main_window(app, dev_data)?;
             telemetry::record_ms("app.startup", started.elapsed().as_secs_f64() * 1000.0, &[]);
             telemetry::start_sampling(app.handle().clone());
             // Headless test runs mustn't put icons in the user's taskbar.

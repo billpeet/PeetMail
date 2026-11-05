@@ -580,6 +580,27 @@ pub fn has_added_search_mail(conn: &Connection, account_id: i64, conversation_id
         .is_some())
 }
 
+/// A dev copy of the installed app's database (datadir::seed_dev): changes still queued for
+/// the server belong to the installed app, which sends them itself, and its snoozes are its
+/// to wake (a stale one would bring back mail archived since). Without this both apps would
+/// act on them. Works on any schema: a table or column an older one lacks is skipped.
+pub fn forget_pending_work(conn: &Connection) -> Result<()> {
+    let has = |table: &str, column: &str| -> Result<bool> {
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2", [table, column], |r| r.get(0))?;
+        Ok(n > 0)
+    };
+    if has("outbox", "id")? {
+        conn.execute("DELETE FROM outbox", [])?;
+    }
+    if has("snoozes", "until")? {
+        conn.execute("DELETE FROM snoozes", [])?;
+    }
+    if has("drafts", "dirty")? {
+        conn.execute("UPDATE drafts SET dirty = 0", [])?;
+    }
+    Ok(())
+}
+
 /// Ends a server search: what it added leaves the cache again (snoozed mail stays, its
 /// snooze needs it) and the rest goes back to normal pruning. Returns how many messages went.
 pub fn clear_search_cache(conn: &Connection) -> Result<usize> {
@@ -1311,6 +1332,36 @@ mod tests {
         let backup = Connection::open(tmp.0.join("peetmail.db.v3.bak")).unwrap();
         assert_eq!(backup.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
         assert_eq!(get_setting(&backup, "cache_days").unwrap().as_deref(), Some("before"));
+    }
+
+    #[test]
+    fn a_dev_copy_forgets_work_queued_for_the_server() {
+        let db = Db::open_in_memory().unwrap();
+        db.with(|c| {
+            let a = upsert_account(c, "microsoft", "b@x.com", None, b"t").unwrap().id;
+            crate::outbox::enqueue(c, a, Some("m1"), &crate::outbox::Op::SetRead { value: true }, std::time::Duration::ZERO).unwrap();
+            c.execute("INSERT INTO drafts (account_id, data) VALUES (?1, '{}')", [a]).unwrap();
+            c.execute("INSERT INTO snoozes (account_id, conversation_id, until) VALUES (?1, 'c1', '2000-01-01T00:00:00.000Z')", [a]).unwrap();
+            assert_eq!(crate::drafts::unpushed(c).unwrap().len(), 1);
+
+            forget_pending_work(c).unwrap();
+            let snoozes: i64 = c.query_row("SELECT COUNT(*) FROM snoozes", [], |r| r.get(0)).unwrap();
+            assert_eq!(snoozes, 0, "a stale snooze would move mail on the server");
+            let queued: i64 = c.query_row("SELECT COUNT(*) FROM outbox", [], |r| r.get(0)).unwrap();
+            assert_eq!(queued, 0);
+            assert!(crate::drafts::unpushed(c).unwrap().is_empty());
+            let drafts: i64 = c.query_row("SELECT COUNT(*) FROM drafts", [], |r| r.get(0)).unwrap();
+            assert_eq!(drafts, 1, "the draft itself stays");
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn forgetting_pending_work_copes_with_an_older_schema() {
+        let mut c = Connection::open_in_memory().unwrap();
+        migrate_to(&mut c, 2).unwrap(); // an outbox, but no snoozes or drafts yet
+        forget_pending_work(&c).unwrap();
     }
 
     #[test]

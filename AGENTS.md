@@ -18,6 +18,7 @@ Done means `pnpm verify` is green and every new behaviour has a test that would 
 - The harness runs its own `tauri build --debug` exe from `src-tauri/target-harness` (separate from `target/`, so a running `pnpm tauri dev` never locks it). It rebuilds automatically via a stamp file. A plain `cargo build` exe loads the Vite dev server instead of the embedded frontend, so it is never used for tests.
 - Test-only env overrides (`PEETMAIL_*`, see `src-tauri/src/testenv.rs`) are compiled out of release builds. Keep new test knobs there.
 - Tests and the drive CLI run in their own data dir and WebView2 profile. The user's real data lives in `%APPDATA%\com.peetsoftware.peetmail`; leave it alone.
+- `pnpm tauri dev` (any build that loads the Vite server, `tauri::is_dev()`) keeps its data in `.peetmail-dev/` (gitignored) in its own checkout, so each worktree has its own. Its first run copies the installed app's database there (minus queued outbox work) and migrates the copy, so the installed version keeps opening its own. Delete `.peetmail-dev/` to take a fresh copy.
 - UI elements that tests or agents target get a `data-testid`. Add one with every new interactive element.
 - Every action is a binding in the keymap registry (`src/lib/keys.svelte.ts`) so it shows in the `?` overlay and the future command palette.
 - Clippy runs with `-D warnings` (`pnpm lint:rust`, part of `pnpm verify` and CI). The Rust code isn't rustfmt-formatted; don't reformat files wholesale.
