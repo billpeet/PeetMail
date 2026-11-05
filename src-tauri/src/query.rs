@@ -182,16 +182,21 @@ fn compile_clauses(clauses: Vec<Clause>) -> Filter {
 // (KQL) and Gmail's `q`. Terms a server can't search on (`is:focused`, `account:`...) are
 // left out and checked locally instead (`with_server_hits`).
 
-/// A value safe inside a server query: no quotes or backslashes, quoted if it has spaces.
+/// A value safe inside a server query: no quotes or backslashes, and quoted (taken
+/// literally) unless it's a plain word or address. Quoting keeps search syntax in what was
+/// typed (`re:budget`, `(draft`, an uppercase `OR`/`NOT`) from acting as operators.
 fn server_value(v: &str) -> Option<String> {
     let v: String = v.chars().filter(|c| *c != '"' && *c != '\\').collect();
     let v = v.trim();
+    let plain = v.chars().all(|c| c.is_alphanumeric() || matches!(c, '.' | '@' | '_' | '-' | '\''))
+        && !v.starts_with('-')
+        && !matches!(v, "AND" | "OR" | "NOT" | "NEAR" | "ONEAR" | "AROUND");
     if v.is_empty() {
         None
-    } else if v.contains(char::is_whitespace) {
-        Some(format!("\"{v}\""))
-    } else {
+    } else if plain {
         Some(v.to_string())
+    } else {
+        Some(format!("\"{v}\""))
     }
 }
 
@@ -381,6 +386,10 @@ mod tests {
         // Quotes and backslashes can't break out of the value.
         assert_eq!(graph_search(r"from:a\b").as_deref(), Some("from:ab"));
         assert_eq!(graph_search_param(r#"subject:"q4 plan""#), r#""subject:\"q4 plan\"""#);
+        // Search syntax in what was typed is taken literally, not as operators.
+        assert_eq!(graph_search("to do NOT forget").as_deref(), Some(r#"to AND do AND "NOT" AND forget"#));
+        assert_eq!(graph_search("re:budget (draft").as_deref(), Some(r#""re:budget" AND "(draft""#));
+        assert_eq!(graph_search("sam@contoso.com o'brien").as_deref(), Some("sam@contoso.com AND o'brien"));
     }
 
     #[test]
@@ -389,6 +398,7 @@ mod tests {
             gmail_search(r#"from:sam budget "q4 plan" -to:kim is:unread is:flagged is:focused account:me"#).as_deref(),
             Some(r#"from:sam budget "q4 plan" -{to:kim cc:kim} is:unread is:starred"#)
         );
+        assert_eq!(gmail_search("cats OR dogs {x}").as_deref(), Some(r#"cats "OR" dogs "{x}""#));
         assert_eq!(gmail_search("is:focused"), None);
         assert_eq!(gmail_search("-from:sam"), None);
     }

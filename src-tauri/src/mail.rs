@@ -376,7 +376,7 @@ pub fn parse_message(v: &Value) -> MessageUpsert {
 
 /// Searches the whole mailbox (Graph `$search`, KQL from `query::graph_search`) and keeps
 /// what it finds for the open search. Returns how many messages it found.
-pub async fn search_server(state: &AppState, account_id: i64, kql: &str, limit: usize) -> Result<usize> {
+pub async fn search_server(state: &AppState, account_id: i64, kql: &str, limit: usize, generation: u64) -> Result<usize> {
     let url = Url::parse_with_params(
         &format!("{}/me/messages", graph::base()),
         &[
@@ -387,12 +387,12 @@ pub async fn search_server(state: &AppState, account_id: i64, kql: &str, limit: 
     )
     .expect("valid url");
     let page = graph_get(state, account_id, url.as_str(), &[PREFER_IMMUTABLE]).await?;
-    keep_search_results(state, account_id, &page, true)
+    keep_search_results(state, account_id, &page, true, generation)
 }
 
 /// Fetches the rest of a conversation opened from server search results (its other messages
 /// may be outside the cache window too).
-pub async fn fetch_conversation(state: &AppState, account_id: i64, conversation_id: &str) -> Result<usize> {
+pub async fn fetch_conversation(state: &AppState, account_id: i64, conversation_id: &str, generation: u64) -> Result<usize> {
     let url = Url::parse_with_params(
         &format!("{}/me/messages", graph::base()),
         &[
@@ -403,14 +403,18 @@ pub async fn fetch_conversation(state: &AppState, account_id: i64, conversation_
     )
     .expect("valid url");
     let page = graph_get(state, account_id, url.as_str(), &[PREFER_IMMUTABLE]).await?;
-    keep_search_results(state, account_id, &page, false)
+    keep_search_results(state, account_id, &page, false, generation)
 }
 
 /// Stores search results in the folders they're in: mail in Deleted Items is left out (like
 /// local search) and so are drafts; mail in folders PeetMail doesn't sync counts as archived.
-fn keep_search_results(state: &AppState, account_id: i64, page: &Value, hit: bool) -> Result<usize> {
+fn keep_search_results(state: &AppState, account_id: i64, page: &Value, hit: bool, generation: u64) -> Result<usize> {
     let items = page["value"].as_array().cloned().unwrap_or_default();
     state.db.with(|c| {
+        // The search closed (or another started) while this was on its way.
+        if !crate::server_search::still_open(generation) {
+            return Ok(0);
+        }
         let folders = db::list_folders(c, account_id)?;
         let tx = c.transaction()?;
         let mut kept = 0;

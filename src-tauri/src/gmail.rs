@@ -731,15 +731,15 @@ fn changed_event(app: &AppHandle, account_id: i64) {
 /// Searches the whole mailbox (Gmail's `q`, from `query::gmail_search`; spam and trash are
 /// left out, as in Gmail) and keeps what it finds for the open search. Returns how many
 /// messages it found.
-pub async fn search_server(app: &AppHandle, state: &AppState, account_id: i64, q: &str, limit: usize) -> Result<usize> {
+pub async fn search_server(app: &AppHandle, state: &AppState, account_id: i64, q: &str, limit: usize, generation: u64) -> Result<usize> {
     let page = get(state, account_id, &format!("{}/messages?q={}&maxResults={limit}", base(), urlencode(q))).await?;
     let ids: Vec<String> = page["messages"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str().map(String::from)).collect();
     let fetched = fetch_many(app, account_id, ids).await;
-    keep_search_results(state, account_id, &fetched, true)
+    keep_search_results(state, account_id, &fetched, true, generation)
 }
 
 /// Fetches the rest of a conversation (Gmail thread) opened from server search results.
-pub async fn fetch_conversation(state: &AppState, account_id: i64, thread_id: &str) -> Result<usize> {
+pub async fn fetch_conversation(state: &AppState, account_id: i64, thread_id: &str, generation: u64) -> Result<usize> {
     let thread = get(state, account_id, &format!("{}/threads/{}?{METADATA}", base(), urlencode(thread_id))).await?;
     let fetched: Vec<(String, Result<Value>)> = thread["messages"]
         .as_array()
@@ -747,14 +747,18 @@ pub async fn fetch_conversation(state: &AppState, account_id: i64, thread_id: &s
         .flatten()
         .filter_map(|m| Some((m["id"].as_str()?.to_string(), Ok(m.clone()))))
         .collect();
-    keep_search_results(state, account_id, &fetched, false)
+    keep_search_results(state, account_id, &fetched, false, generation)
 }
 
 /// Stores search results in the folders their labels put them in (trash and spam left out).
-fn keep_search_results(state: &AppState, account_id: i64, fetched: &[(String, Result<Value>)], hit: bool) -> Result<usize> {
+fn keep_search_results(state: &AppState, account_id: i64, fetched: &[(String, Result<Value>)], hit: bool, generation: u64) -> Result<usize> {
     let snooze = state.db.with(|c| db::get_setting(c, &snooze_label_key(account_id)))?;
     let parsed: Vec<_> = fetched.iter().filter_map(|(_, r)| r.as_ref().ok()).map(|v| parse_message(v, snooze.as_deref())).collect();
     state.db.with(|c| {
+        // The search closed (or another started) while this was on its way.
+        if !crate::server_search::still_open(generation) {
+            return Ok(0);
+        }
         let tx = c.transaction()?;
         let mut kept = 0;
         for (role, m) in &parsed {

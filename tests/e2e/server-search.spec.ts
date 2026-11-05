@@ -101,6 +101,22 @@ test("a new server search replaces the last one's results", async ({ inbox: page
   await expect(row(page, "conv-pension")).toHaveCount(0);
 });
 
+test("closing the search while the server is still answering leaves nothing behind", async ({ inbox: page, fake }) => {
+  await deliverOldThread(fake);
+  await search(page, "pension");
+  await fake.control("config", { latencyMs: 1500 });
+  const before = fake.state.requests.length;
+  await page.keyboard.press("Control+Enter");
+  await expect(page.getByTestId("server-search")).toHaveAttribute("data-state", "searching");
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("splits")).toBeVisible();
+  // The answer lands after the search closed: it must not be kept.
+  await expect.poll(() => fake.requestsSince(before).some((r) => r.path === "/v1.0/me/messages" && r.status === 200), { timeout: 10_000 }).toBe(true);
+  await fake.control("config", { latencyMs: 0 });
+  await search(page, "pension");
+  await expect(page.getByTestId("thread-list-empty")).toContainText("No matches.");
+});
+
 test("a query with nothing the server can search says so", async ({ inbox: page }) => {
   await search(page, "is:focused");
   await page.keyboard.press("Control+Enter");
