@@ -115,7 +115,6 @@ fn like(v: &str) -> SqlValue {
     SqlValue::Text(format!("%{}%", v.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")))
 }
 
-/// Compiles a query into a SQL condition (always valid, `1` when empty).
 /// How many free-text terms and how many operators (`from:`, `is:`…) a query has: its
 /// shape for telemetry, without any of its words.
 pub fn shape(input: &str) -> (usize, usize) {
@@ -124,10 +123,15 @@ pub fn shape(input: &str) -> (usize, usize) {
     (text, clauses.len() - text)
 }
 
+/// Compiles a query into a SQL condition (always valid, `1` when empty).
 pub fn compile(input: &str) -> Filter {
+    compile_clauses(parse(input))
+}
+
+fn compile_clauses(clauses: Vec<Clause>) -> Filter {
     let mut parts = Vec::new();
     let mut params = Vec::new();
-    for Clause { negated, term } in parse(input) {
+    for Clause { negated, term } in clauses {
         let cond = match term {
             Term::Account(v) => {
                 params.push(like(&v));
@@ -168,6 +172,115 @@ pub fn compile(input: &str) -> Filter {
     }
     Filter {
         sql: if parts.is_empty() { "1".into() } else { parts.join(" AND ") },
+        params,
+    }
+}
+
+// ---------- server search ----------
+//
+// The same query, sent to the server for mail outside the cache window: Graph `$search`
+// (KQL) and Gmail's `q`. Terms a server can't search on (`is:focused`, `account:`...) are
+// left out and checked locally instead (`with_server_hits`).
+
+/// A value safe inside a server query: no quotes or backslashes, quoted if it has spaces.
+fn server_value(v: &str) -> Option<String> {
+    let v: String = v.chars().filter(|c| *c != '"' && *c != '\\').collect();
+    let v = v.trim();
+    if v.is_empty() {
+        None
+    } else if v.contains(char::is_whitespace) {
+        Some(format!("\"{v}\""))
+    } else {
+        Some(v.to_string())
+    }
+}
+
+/// A phrase, always quoted.
+fn server_phrase(t: &str) -> Option<String> {
+    server_value(t).map(|v| if v.starts_with('"') { v } else { format!("\"{v}\"") })
+}
+
+/// The query as Graph `$search` text (KQL), or None when nothing in it is searchable there
+/// (KQL can't start with NOT, so at least one term must be positive).
+pub fn graph_search(input: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    let mut positive = false;
+    for Clause { negated, term } in parse(input) {
+        let kql = match term {
+            Term::From(v) => server_value(&v).map(|v| format!("from:{v}")),
+            Term::To(v) => server_value(&v).map(|v| format!("recipients:{v}")),
+            Term::Subject(v) => server_value(&v).map(|v| format!("subject:{v}")),
+            Term::HasAttachment => Some("hasAttachments:true".into()),
+            Term::Text(t) => server_value(&t),
+            Term::Phrase(t) => server_phrase(&t),
+            Term::Is(_) | Term::Account(_) => None,
+        };
+        let Some(kql) = kql else { continue };
+        positive |= !negated;
+        parts.push(if negated { format!("NOT {kql}") } else { kql });
+    }
+    // Positive terms first: "NOT x AND y" isn't valid KQL, "y AND NOT x" is.
+    parts.sort_by_key(|p| p.starts_with("NOT "));
+    positive.then(|| parts.join(" AND "))
+}
+
+/// The value of Graph's `$search` parameter: the KQL in double quotes, its own quotes escaped.
+pub fn graph_search_param(kql: &str) -> String {
+    format!("\"{}\"", kql.replace('"', "\\\""))
+}
+
+/// The query as Gmail search (`q`), or None when nothing in it is searchable there.
+pub fn gmail_search(input: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    let mut positive = false;
+    for Clause { negated, term } in parse(input) {
+        let q = match term {
+            Term::From(v) => server_value(&v).map(|v| format!("from:{v}")),
+            Term::To(v) => server_value(&v).map(|v| format!("{{to:{v} cc:{v}}}")),
+            Term::Subject(v) => server_value(&v).map(|v| format!("subject:{v}")),
+            Term::HasAttachment => Some("has:attachment".into()),
+            Term::Is(v) => match v.as_str() {
+                "unread" => Some("is:unread".into()),
+                "read" => Some("is:read".into()),
+                "flagged" | "starred" => Some("is:starred".into()),
+                _ => None,
+            },
+            Term::Text(t) => server_value(&t),
+            Term::Phrase(t) => server_phrase(&t),
+            Term::Account(_) => None,
+        };
+        let Some(q) = q else { continue };
+        positive |= !negated;
+        parts.push(if negated { format!("-{q}") } else { q });
+    }
+    positive.then(|| parts.join(" "))
+}
+
+/// Whether the query's `account:` terms let it search this account.
+pub fn account_matches(input: &str, email: &str) -> bool {
+    let email = email.to_lowercase();
+    parse(input).into_iter().all(|Clause { negated, term }| match term {
+        Term::Account(v) => email.contains(&v.to_lowercase()) != negated,
+        _ => true,
+    })
+}
+
+/// Adds the server search's results to a search filter: messages the server matched that
+/// also pass the terms only checked here (`is:`, `account:`). Free text isn't checked again:
+/// the server matched it, often in a body that isn't cached.
+pub fn with_server_hits(local: Filter, input: &str) -> Filter {
+    let local_only: Vec<Clause> = parse(input).into_iter().filter(|c| matches!(c.term, Term::Is(_) | Term::Account(_))).collect();
+    let checks = if local_only.is_empty() { None } else { Some(compile_clauses(local_only)) };
+    let mut params = local.params;
+    let extra = match checks {
+        Some(f) => {
+            params.extend(f.params);
+            format!(" AND {}", f.sql)
+        }
+        None => String::new(),
+    };
+    Filter {
+        sql: format!("({}) OR (m.id IN (SELECT message_id FROM search_cache WHERE hit = 1){extra})", local.sql),
         params,
     }
 }
@@ -251,6 +364,52 @@ mod tests {
         let p = compile(r#""quick question""#);
         assert_eq!(p.params.len(), 1);
         assert_eq!(p.params, vec![SqlValue::Text(r#""quick question""#.into())]);
+    }
+
+    #[test]
+    fn graph_search_is_kql_with_local_only_terms_left_out() {
+        assert_eq!(
+            graph_search(r#"from:sam budget "q4 plan" -subject:draft is:unread account:work has:attachment"#).as_deref(),
+            Some(r#"from:sam AND budget AND "q4 plan" AND hasAttachments:true AND NOT subject:draft"#)
+        );
+        assert_eq!(graph_search("to:kim").as_deref(), Some("recipients:kim"));
+        assert_eq!(graph_search(r#"from:"Sam Carter""#).as_deref(), Some(r#"from:"Sam Carter""#));
+        // Nothing positive for the server to search on.
+        assert_eq!(graph_search("is:unread account:work"), None);
+        assert_eq!(graph_search("-from:sam"), None);
+        assert_eq!(graph_search(""), None);
+        // Quotes and backslashes can't break out of the value.
+        assert_eq!(graph_search(r"from:a\b").as_deref(), Some("from:ab"));
+        assert_eq!(graph_search_param(r#"subject:"q4 plan""#), r#""subject:\"q4 plan\"""#);
+    }
+
+    #[test]
+    fn gmail_search_maps_terms_to_gmail_operators() {
+        assert_eq!(
+            gmail_search(r#"from:sam budget "q4 plan" -to:kim is:unread is:flagged is:focused account:me"#).as_deref(),
+            Some(r#"from:sam budget "q4 plan" -{to:kim cc:kim} is:unread is:starred"#)
+        );
+        assert_eq!(gmail_search("is:focused"), None);
+        assert_eq!(gmail_search("-from:sam"), None);
+    }
+
+    #[test]
+    fn account_terms_pick_the_accounts_to_search() {
+        assert!(account_matches("budget", "me@work.com"));
+        assert!(account_matches("account:WORK budget", "me@work.com"));
+        assert!(!account_matches("account:gmail", "me@work.com"));
+        assert!(!account_matches("-account:work", "me@work.com"));
+    }
+
+    #[test]
+    fn server_hits_join_local_results_with_local_only_checks() {
+        let f = with_server_hits(compile("budget is:unread"), "budget is:unread");
+        assert!(f.sql.starts_with("(m.id IN (SELECT rowid FROM messages_fts"), "{}", f.sql);
+        assert!(f.sql.ends_with("OR (m.id IN (SELECT message_id FROM search_cache WHERE hit = 1) AND m.is_read = 0)"), "{}", f.sql);
+        assert_eq!(f.params.len(), 1, "is: has no parameter");
+        let a = with_server_hits(compile("budget account:work"), "budget account:work");
+        assert_eq!(a.params.len(), 3, "the account check's parameter follows the local filter's");
+        assert!(with_server_hits(compile("budget"), "budget").sql.ends_with("WHERE hit = 1))"));
     }
 
     #[test]

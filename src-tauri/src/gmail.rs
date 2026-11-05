@@ -726,6 +726,48 @@ fn changed_event(app: &AppHandle, account_id: i64) {
     let _ = app.emit(mail::EVENT_MAIL_CHANGED, json!({ "accountId": account_id, "folderId": null }));
 }
 
+// ---------- server search ----------
+
+/// Searches the whole mailbox (Gmail's `q`, from `query::gmail_search`; spam and trash are
+/// left out, as in Gmail) and keeps what it finds for the open search. Returns how many
+/// messages it found.
+pub async fn search_server(app: &AppHandle, state: &AppState, account_id: i64, q: &str, limit: usize) -> Result<usize> {
+    let page = get(state, account_id, &format!("{}/messages?q={}&maxResults={limit}", base(), urlencode(q))).await?;
+    let ids: Vec<String> = page["messages"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str().map(String::from)).collect();
+    let fetched = fetch_many(app, account_id, ids).await;
+    keep_search_results(state, account_id, &fetched, true)
+}
+
+/// Fetches the rest of a conversation (Gmail thread) opened from server search results.
+pub async fn fetch_conversation(state: &AppState, account_id: i64, thread_id: &str) -> Result<usize> {
+    let thread = get(state, account_id, &format!("{}/threads/{}?{METADATA}", base(), urlencode(thread_id))).await?;
+    let fetched: Vec<(String, Result<Value>)> = thread["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| Some((m["id"].as_str()?.to_string(), Ok(m.clone()))))
+        .collect();
+    keep_search_results(state, account_id, &fetched, false)
+}
+
+/// Stores search results in the folders their labels put them in (trash and spam left out).
+fn keep_search_results(state: &AppState, account_id: i64, fetched: &[(String, Result<Value>)], hit: bool) -> Result<usize> {
+    let snooze = state.db.with(|c| db::get_setting(c, &snooze_label_key(account_id)))?;
+    let parsed: Vec<_> = fetched.iter().filter_map(|(_, r)| r.as_ref().ok()).map(|v| parse_message(v, snooze.as_deref())).collect();
+    state.db.with(|c| {
+        let tx = c.transaction()?;
+        let mut kept = 0;
+        for (role, m) in &parsed {
+            let Some(role) = role.filter(|r| *r != "deleteditems") else { continue };
+            let folder = db::ensure_local_folder(&tx, account_id, role, folder_name(role))?;
+            db::keep_search_result(&tx, account_id, folder.id, m, hit)?;
+            kept += 1;
+        }
+        tx.commit()?;
+        Ok(kept)
+    })
+}
+
 async fn full(app: &AppHandle, state: &AppState, account_id: i64) -> Result<()> {
     // The historyId from before listing, so anything that changes meanwhile shows up next time.
     let profile = get(state, account_id, &format!("{}/profile", base())).await?;
@@ -753,7 +795,8 @@ async fn full(app: &AppHandle, state: &AppState, account_id: i64) -> Result<()> 
         let busy = outbox::busy_remote_ids(c, account_id)?;
         let mut stmt = c.prepare(
             "SELECT m.remote_id FROM messages m JOIN folders f ON f.id = m.folder_id
-             WHERE m.account_id = ?1 AND f.role IN ('inbox', 'sentitems', 'archive', 'deleteditems')",
+             WHERE m.account_id = ?1 AND f.role IN ('inbox', 'sentitems', 'archive', 'deleteditems')
+               AND m.id NOT IN (SELECT message_id FROM search_cache)",
         )?;
         let local: Vec<String> = stmt.query_map([account_id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
         for id in local.iter().filter(|id| !seen_set.contains(*id) && !busy.contains(*id)) {

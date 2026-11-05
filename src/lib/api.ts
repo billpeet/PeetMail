@@ -255,6 +255,16 @@ export type Cursor = { sortAt: string; messageId: number };
 
 export type SyncStatus = { state: "syncing" | "idle" | "error"; message: string | null };
 
+/** What a server search found. */
+export type ServerSearchOutcome = {
+  /** Messages found, across accounts. */
+  found: number;
+  /** Accounts searched. */
+  searched: number;
+  /** Addresses of accounts whose search failed. */
+  failed: string[];
+};
+
 export const api = {
   bootstrap: () => invoke<Bootstrap>("bootstrap"),
   setClientId: (clientId: string) => invoke<void>("set_client_id", { clientId }),
@@ -267,10 +277,18 @@ export const api = {
   /**
    * Conversations in `mailbox` (null: all mail, for search). `split` picks a split-inbox tab
    * (0 = Inbox) and wins over both; `query` uses the query language (src-tauri/src/query.rs).
-   * `hidden`: accounts toggled off in the footer legend.
+   * `hidden`: accounts toggled off in the footer legend. `withServer`: a search also lists
+   * what the server search (`searchServer`) found.
    */
-  listThreads: (mailbox: Mailbox | null, query: string, split: number | null, cursor: Cursor | null, limit: number, hidden: number[] = []) =>
-    invoke<ThreadRow[]>("list_threads", { mailbox, query, split, cursor, limit, hidden }),
+  listThreads: (mailbox: Mailbox | null, query: string, split: number | null, cursor: Cursor | null, limit: number, hidden: number[] = [], withServer = false) =>
+    invoke<ThreadRow[]>("list_threads", { mailbox, query, split, cursor, limit, hidden, withServer }),
+  /** Searches the server for mail outside the cache window; results join the search's list until `clearServerSearch`. */
+  searchServer: (query: string, hidden: number[] = []) => invoke<ServerSearchOutcome>("search_server", { query, hidden }),
+  /** Fetches the rest of a conversation opened from server results; true when anything came. */
+  fetchSearchConversation: (accountId: number, conversationId: string) =>
+    invoke<boolean>("fetch_search_conversation", { accountId, conversationId }),
+  /** Closes the server search: mail it fetched leaves the cache again. */
+  clearServerSearch: () => invoke<void>("clear_server_search"),
   /** `withTrash`: include messages in Deleted Items (the Trash view). */
   getThread: (accountId: number, conversationId: string, withTrash = false) =>
     invoke<MessageRow[]>("get_thread", { accountId, conversationId, withTrash }),
