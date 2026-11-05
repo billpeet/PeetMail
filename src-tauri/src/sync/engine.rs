@@ -14,7 +14,7 @@ use url::Url;
 
 use super::client::{self, CallError, CallResult, Client, PushItem, PushResult};
 use super::crypto::MasterKey;
-use super::{hlc, store, Scope};
+use super::{accounts, hlc, store, Scope};
 use crate::db;
 use crate::error::{AppError, Result};
 use crate::secure;
@@ -267,6 +267,18 @@ pub async fn run(app: &AppHandle) {
     let result = exchange(&state, &j).await;
     let outcome = match result {
         Ok(changed) => {
+            // Accounts another PC signed out everywhere go here too.
+            match state.db.with(|c| accounts::removed_elsewhere(c, &changed)) {
+                Ok(ids) => {
+                    for id in ids {
+                        log::info!("settings sync: signing out an account another PC signed out everywhere");
+                        if let Err(e) = crate::commands::remove_account(&state, id).await {
+                            log::warn!("settings sync: removing an account: {e}");
+                        }
+                    }
+                }
+                Err(e) => log::warn!("settings sync: checking for removed accounts: {e}"),
+            }
             if let Err(e) = link_accounts(&state, &j).await {
                 log::warn!("settings sync: linking accounts: {e}");
             }

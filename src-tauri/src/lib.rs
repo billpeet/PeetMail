@@ -389,6 +389,8 @@ pub fn run() {
             commands::get_message_body,
             commands::sync_now,
             sync::commands::settings_sync_status,
+            sync::commands::synced_accounts,
+            sync::commands::dismiss_synced_account,
             sync::commands::settings_sync_connect,
             sync::commands::settings_sync_join,
             sync::commands::settings_sync_create,

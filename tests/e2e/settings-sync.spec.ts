@@ -181,6 +181,93 @@ it("plain http is only for this PC, and an address that isn't a sync server says
 it.describe("with two accounts", () => {
   it.use({ secondAccount: true });
 
+  type Pair = Parameters<Parameters<typeof it>[2]>[0]["pair"];
+  const accountRow = (page: Page, email: string) => page.locator(`[data-testid=account-row][data-email="${email}"]`);
+  const offered = (page: Page, email: string) => page.locator(`[data-testid=synced-account][data-email="${email}"]`);
+
+  /** Adds the work mailbox on a PC (from Settings → Accounts, which is left open). */
+  async function addWork(page: Page, pair: Pair) {
+    pair.signInAs("b");
+    await openSettings(page, "accounts");
+    await page.getByTestId("account-add").click();
+    await expect(accountRow(page, WORK_ACCOUNT.mail)).toBeVisible({ timeout: 15_000 });
+    pair.signInAs("a");
+  }
+
+  /** A with sync on and the work mailbox; B signed in to the default mailbox only, joined. */
+  async function twoPcs(a: Page, pair: Pair, server: SyncServer) {
+    await turnOnFirst(a, server);
+    await addWork(a, pair);
+    await syncSettings(a);
+    await a.keyboard.press("Escape");
+    const b = await secondDevice(pair);
+    await connectExisting(b.page, server);
+    await unlock(b.page, PASSPHRASE);
+    return b;
+  }
+
+  async function signOutWork(page: Page, choice: "here" | "everywhere") {
+    await openSettings(page, "accounts");
+    await accountRow(page, WORK_ACCOUNT.mail).getByTestId("account-signout").click();
+    await accountRow(page, WORK_ACCOUNT.mail).getByTestId(`account-signout-${choice}`).click();
+    await expect(accountRow(page, WORK_ACCOUNT.mail)).toHaveCount(0);
+  }
+
+  it("an account added on one PC is offered on the other, and signing in there adds it", async ({ inbox: a, pair, server }) => {
+    const b = await twoPcs(a, pair, server);
+    try {
+      // B hears about it as it arrives, once.
+      await expect(b.page.getByTestId("toast")).toContainText(`${WORK_ACCOUNT.mail} is on your other PC`, { timeout: 15_000 });
+      await b.page.keyboard.press("Escape");
+      await openSettings(b.page, "accounts");
+      await expect(offered(b.page, WORK_ACCOUNT.mail)).toContainText("not signed in on this PC");
+      // The account B already has isn't offered.
+      await expect(b.page.getByTestId("synced-account")).toHaveCount(1);
+      pair.signInAs("b");
+      await offered(b.page, WORK_ACCOUNT.mail).getByTestId("synced-account-signin").click();
+      await expect(accountRow(b.page, WORK_ACCOUNT.mail)).toBeVisible({ timeout: 15_000 });
+      await expect(b.page.getByTestId("synced-account")).toHaveCount(0);
+      // The sign-in page was told which account to suggest.
+      expect(pair.second.state.authorizations.at(-1)?.login_hint).toBe(WORK_ACCOUNT.mail);
+    } finally {
+      await b.close();
+    }
+  });
+
+  it("signing out on this PC only leaves the other PCs alone; everywhere signs them out too", async ({ inbox: a, pair, server }) => {
+    const b = await twoPcs(a, pair, server);
+    try {
+      await b.page.keyboard.press("Escape");
+      await openSettings(b.page, "accounts");
+      pair.signInAs("b");
+      await offered(b.page, WORK_ACCOUNT.mail).getByTestId("synced-account-signin").click();
+      await expect(accountRow(b.page, WORK_ACCOUNT.mail)).toBeVisible({ timeout: 15_000 });
+      pair.signInAs("a");
+
+      // This PC only: gone from B, not offered there again, still on A.
+      await signOutWork(b.page, "here");
+      await expect(offered(b.page, WORK_ACCOUNT.mail)).toHaveCount(0);
+      await syncSettings(b.page);
+      await syncSettings(a);
+      await openSettings(a, "accounts");
+      await expect(accountRow(a, WORK_ACCOUNT.mail)).toBeVisible();
+      await a.keyboard.press("Escape");
+
+      // Back on B, then signed out everywhere from B: A signs it out too.
+      await b.page.keyboard.press("Escape");
+      await addWork(b.page, pair);
+      await signOutWork(b.page, "everywhere");
+      await syncSettings(b.page);
+      await syncSettings(a);
+      await openSettings(a, "accounts");
+      await expect(accountRow(a, WORK_ACCOUNT.mail)).toHaveCount(0, { timeout: 10_000 });
+      await expect(a.getByTestId("account-row")).toHaveCount(1); // its own account stays
+      await expect(offered(a, WORK_ACCOUNT.mail)).toHaveCount(0);
+    } finally {
+      await b.close();
+    }
+  });
+
   it("the other accounts on a PC are linked automatically, so either signs a new PC in", async ({ inbox: a, pair, server }) => {
     pair.signInAs("b");
     await openSettings(a, "accounts");

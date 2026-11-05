@@ -8,6 +8,7 @@ If you use PeetMail on more than one PC, settings sync keeps your settings the s
 - Snippets
 - Signatures, including "My organisation adds my signature"
 - Hide empty splits, the first day of the week, the undo-send delay and notifications
+- Which accounts you use: a PC that doesn't have one yet offers to sign in to it
 
 Some settings stay on each PC, because they depend on that PC: the layout and pane widths, close to tray, starting with Windows, how much mail is kept offline, the update channel, and crash report and usage data choices. Your own sign-in app (Settings → Advanced) doesn't sync yet either.
 
@@ -37,6 +38,17 @@ To change your passphrase, go to **Settings → Sync** on a PC that syncs. Your 
 Any of your accounts can sign a new PC in. Each PC links its other accounts automatically once sync is on. An account that's already linked to someone else's sync account isn't linked to yours.
 
 The list under **Settings → Sync → Accounts** shows what's linked. **Unlink** removes one; the last account can't be unlinked. If one of your accounts is from work, link a personal one too, so you can still sign in to sync if you leave.
+
+## Your accounts on every PC
+
+When you add an account on one PC, your other PCs hear about it. A message says so, and **Settings → Accounts** lists it under **On your other PCs**. **Sign in** there signs in to it on this PC, with the account already filled in on the sign-in page. **Hide** stops suggesting it on this PC. An account that signs in with your own sign-in app needs that app set up on this PC first (Settings → Advanced).
+
+With sync on, **Sign out** asks which you mean:
+
+- **This PC only**: the account leaves this PC (with its cached mail) and stays on your others. This PC stops suggesting it.
+- **Everywhere**: the account leaves every PC that syncs, the next time each one syncs.
+
+Signing in to an account again, anywhere, puts it back on the list.
 
 ## When two PCs change the same thing
 

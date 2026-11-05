@@ -13,6 +13,7 @@ Unreleased into that version's section when cutting a stable release.
 ## Unreleased
 
 - Your settings can follow you between PCs: splits, snippets, signatures and preferences sync through a server you or your organisation runs, encrypted on your PC first so the server can't read them. Turn it on under **Settings → Sync**; see Help (**F1**) → Syncing settings.
+- With settings sync on, an account you add on one PC is offered on your others (**Settings → Accounts → On your other PCs**), and signing an account out asks whether it's for this PC only or everywhere.
 
 ## 0.2.1 — 2026-11-05
 

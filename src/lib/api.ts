@@ -272,10 +272,13 @@ export const api = {
   bootstrap: () => invoke<Bootstrap>("bootstrap"),
   setClientId: (clientId: string) => invoke<void>("set_client_id", { clientId }),
   /** `oauthApp` unset: the built-in app when the build has one, else the user's own. */
-  signIn: (provider: Provider = "microsoft", oauthApp?: OAuthApp) => invoke<Account>("sign_in", { provider, oauthApp: oauthApp ?? null }),
+  /** `loginHint`: the address to suggest on the sign-in page (an account from another PC). */
+  signIn: (provider: Provider = "microsoft", oauthApp?: OAuthApp, loginHint?: string) =>
+    invoke<Account>("sign_in", { provider, oauthApp: oauthApp ?? null, loginHint: loginHint ?? null }),
   setGoogleClient: (clientId: string, clientSecret: string | null) => invoke<void>("set_google_client", { clientId, clientSecret }),
   cancelSignIn: () => invoke<void>("cancel_sign_in"),
-  signOut: (accountId: number) => invoke<void>("sign_out", { accountId }),
+  /** `everywhere` (settings sync): sign it out on every PC that syncs, not just this one. */
+  signOut: (accountId: number, everywhere = false) => invoke<void>("sign_out", { accountId, everywhere }),
   listFolders: (accountId: number) => invoke<Folder[]>("list_folders", { accountId }),
   /**
    * Conversations in `mailbox` (null: all mail, for search). `split` picks a split-inbox tab
@@ -538,8 +541,14 @@ export type SyncConnected = { next: "join" | "create"; accounts: { id: number; e
 export type SyncDevice = { id: number; name: string; createdAt: string; lastSeenAt: string; current: boolean };
 export type SyncIdentity = { id: number; provider: "microsoft" | "google"; email: string | null; linkedAt: string };
 
+/** An account another PC syncs that this one doesn't have. */
+export type ElsewhereAccount = { provider: Provider; email: string; oauthApp: OAuthApp; displayName: string | null };
+
 export const settingsSyncApi = {
   status: () => invoke<SettingsSyncStatus>("settings_sync_status"),
+  /** Accounts on other PCs that sync, not on this one (none while sync is off). */
+  elsewhere: () => invoke<ElsewhereAccount[]>("synced_accounts"),
+  dismissElsewhere: (provider: Provider, email: string) => invoke<void>("dismiss_synced_account", { provider, email }),
   connect: (server: string) => invoke<SyncConnected>("settings_sync_connect", { server }),
   /** The passphrase or the recovery key. */
   join: (secret: string) => invoke<SettingsSyncStatus>("settings_sync_join", { secret }),
