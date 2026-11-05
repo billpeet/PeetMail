@@ -49,6 +49,7 @@ Everything has a keyboard shortcut. The ones to start with:
 | **z** | Undo, including a send for a few seconds |
 | **/** | Search |
 | **h** | Snooze until later |
+| **x** | Select a conversation (see below) |
 | **2** / **1** | Calendar / mail |
 | **Ctrl+K** | Every command, searchable |
 | **?** | All keyboard shortcuts |
@@ -68,6 +69,12 @@ Format as you write: **Ctrl+B**, **Ctrl+I** and **Ctrl+U** for bold, italic and 
 **Ctrl+Shift+C** and **Ctrl+Shift+B** add Cc and Bcc. People in Bcc get the message, but no one else sees their addresses.
 
 To attach files, press **Ctrl+Shift+A** (or the paperclip) to pick them, drag them from Explorer (or your file manager) onto the message, or paste them, a screenshot included. A message can carry up to 25 MB of attachments. A forward lists the original's attachments; remove any you don't want to pass on with its **×**.
+
+### Several conversations at once
+
+Press **x** to select the conversation you're on, and **x** again to take it out. **Shift+J** and **Shift+K** select as you move down or up, and **Ctrl+A** selects everything in the view, including what's further down the list. With the mouse, Ctrl+click a conversation to select it and Shift+click to select everything up to it. The number selected shows at the top of the list.
+
+While conversations are selected, **e**, **#**, **u**, **s** and **h** act on all of them: archive, delete, mark read, flag or snooze. If only some are unread, **u** marks them all read; if they're all read, it marks them all unread (**s** does the same with flags). One **z** undoes the whole lot. **Esc** clears the selection, and so does opening a conversation or going to another mailbox. To clear a whole view in one go, press **Ctrl+A** and then **e**.
 
 ## Your mail on this PC
 

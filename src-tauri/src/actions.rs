@@ -53,6 +53,19 @@ pub struct UndoEntry {
     pub snooze: Option<(String, Option<String>)>,
 }
 
+/// One undo step: a single action, or one taken on several conversations at once
+/// (one `z` reverses all of it).
+#[derive(Debug, Clone)]
+pub struct UndoGroup {
+    pub label: String,
+    pub entries: Vec<UndoEntry>,
+}
+
+/// Toast and undo label for an action on `n` conversations: "Archived", "Archived 3 conversations".
+pub fn batch_label(label: &str, n: usize) -> String {
+    if n == 1 { label.to_string() } else { format!("{label} {n} conversations") }
+}
+
 /// Outbox destination for snoozed mail; resolved to the hidden server folder when sent.
 pub const SNOOZE_DEST: &str = "peetmail:snoozed";
 pub const SNOOZED_ROLE: &str = "snoozed";
@@ -66,9 +79,30 @@ fn now_iso() -> String {
 /// conversation just changes the time.
 pub fn snooze(conn: &mut Connection, account_id: i64, conversation_id: &str, until: chrono::DateTime<chrono::Utc>) -> Result<UndoEntry> {
     let tx = conn.transaction()?;
-    let inbox = db::folder_by_role(&tx, account_id, "inbox")?.map(|f| f.id);
-    let snoozed = db::ensure_local_folder(&tx, account_id, SNOOZED_ROLE, "Snoozed")?.id;
-    let all = db::conversation_states(&tx, account_id, conversation_id, None)?;
+    let entry = snooze_in(&tx, account_id, conversation_id, until)?;
+    tx.commit()?;
+    Ok(entry)
+}
+
+/// Snoozes several conversations in one transaction. Returns an entry for each one that changed.
+pub fn snooze_many(conn: &mut Connection, targets: &[(i64, String)], until: chrono::DateTime<chrono::Utc>) -> Result<Vec<UndoEntry>> {
+    let tx = conn.transaction()?;
+    let mut out = Vec::new();
+    for (account_id, conversation_id) in targets {
+        let entry = snooze_in(&tx, *account_id, conversation_id, until)?;
+        if entry.snooze.is_some() {
+            out.push(entry);
+        }
+    }
+    tx.commit()?;
+    Ok(out)
+}
+
+/// `snooze` inside the caller's transaction.
+fn snooze_in(tx: &Connection, account_id: i64, conversation_id: &str, until: chrono::DateTime<chrono::Utc>) -> Result<UndoEntry> {
+    let inbox = db::folder_by_role(tx, account_id, "inbox")?.map(|f| f.id);
+    let snoozed = db::ensure_local_folder(tx, account_id, SNOOZED_ROLE, "Snoozed")?.id;
+    let all = db::conversation_states(tx, account_id, conversation_id, None)?;
     let targets: Vec<MessageState> = all.iter().filter(|m| Some(m.folder_id) == inbox).cloned().collect();
     let previous: Option<String> = tx
         .query_row("SELECT until FROM snoozes WHERE account_id = ?1 AND conversation_id = ?2", params![account_id, conversation_id], |r| r.get(0))
@@ -78,8 +112,8 @@ pub fn snooze(conn: &mut Connection, account_id: i64, conversation_id: &str, unt
     }
     let mut ops = Vec::with_capacity(targets.len());
     for m in &targets {
-        db::set_folder(&tx, m.id, snoozed)?;
-        let id = outbox::enqueue(&tx, account_id, Some(&m.remote_id), &Op::Move { destination: SNOOZE_DEST.into() }, GRACE)?;
+        db::set_folder(tx, m.id, snoozed)?;
+        let id = outbox::enqueue(tx, account_id, Some(&m.remote_id), &Op::Move { destination: SNOOZE_DEST.into() }, GRACE)?;
         ops.push((id, m.remote_id.clone(), Op::Move { destination: "inbox".into() }));
     }
     tx.execute(
@@ -87,7 +121,6 @@ pub fn snooze(conn: &mut Connection, account_id: i64, conversation_id: &str, unt
          ON CONFLICT (account_id, conversation_id) DO UPDATE SET until = excluded.until",
         params![account_id, conversation_id, until.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()],
     )?;
-    tx.commit()?;
     // `before` holds the moved messages; a re-time with nothing moved still needs an entry
     // so undo can restore the old time, so count it as one change.
     Ok(UndoEntry { label: "Snoozed".into(), account_id, before: targets, ops, snooze: Some((conversation_id.into(), previous)) })
@@ -178,7 +211,29 @@ pub struct ActionOutcome {
 /// (empty `before` means there was nothing to do).
 pub fn apply(conn: &mut Connection, account_id: i64, conversation_id: &str, action: Action) -> Result<UndoEntry> {
     let tx = conn.transaction()?;
-    let all = db::conversation_states(&tx, account_id, conversation_id, None)?;
+    let entry = apply_in(&tx, account_id, conversation_id, action)?;
+    tx.commit()?;
+    Ok(entry)
+}
+
+/// Applies `action` to several conversations in one transaction. Returns an entry for
+/// each one that changed.
+pub fn apply_many(conn: &mut Connection, targets: &[(i64, String)], action: Action) -> Result<Vec<UndoEntry>> {
+    let tx = conn.transaction()?;
+    let mut out = Vec::new();
+    for (account_id, conversation_id) in targets {
+        let entry = apply_in(&tx, *account_id, conversation_id, action)?;
+        if !entry.before.is_empty() {
+            out.push(entry);
+        }
+    }
+    tx.commit()?;
+    Ok(out)
+}
+
+/// `apply` inside the caller's transaction.
+fn apply_in(tx: &Connection, account_id: i64, conversation_id: &str, action: Action) -> Result<UndoEntry> {
+    let all = db::conversation_states(tx, account_id, conversation_id, None)?;
 
     // Moves: which folders the messages come from and go to. Each move's undo sends a message
     // back to the folder it came from (deleting from Done puts it back in Done).
@@ -191,10 +246,10 @@ pub fn apply(conn: &mut Connection, account_id: i64, conversation_id: &str, acti
         _ => None,
     };
     if let Some((from, (to, name))) = moves {
-        let target = db::ensure_local_folder(&tx, account_id, to, name)?.id;
+        let target = db::ensure_local_folder(tx, account_id, to, name)?.id;
         let mut origin = std::collections::HashMap::new();
         for role in from {
-            if let Some(f) = db::folder_by_role(&tx, account_id, role)? {
+            if let Some(f) = db::folder_by_role(tx, account_id, role)? {
                 origin.insert(f.id, *role);
             }
         }
@@ -202,8 +257,8 @@ pub fn apply(conn: &mut Connection, account_id: i64, conversation_id: &str, acti
         let remote = Op::Move { destination: to.into() };
         let mut ops = Vec::with_capacity(targets.len());
         for m in &targets {
-            db::set_folder(&tx, m.id, target)?;
-            let id = outbox::enqueue(&tx, account_id, Some(&m.remote_id), &remote, GRACE)?;
+            db::set_folder(tx, m.id, target)?;
+            let id = outbox::enqueue(tx, account_id, Some(&m.remote_id), &remote, GRACE)?;
             // Snoozed mail goes back to the snooze folder, which the outbox resolves.
             let back = match origin[&m.folder_id] {
                 SNOOZED_ROLE => SNOOZE_DEST,
@@ -211,7 +266,6 @@ pub fn apply(conn: &mut Connection, account_id: i64, conversation_id: &str, acti
             };
             ops.push((id, m.remote_id.clone(), Op::Move { destination: back.into() }));
         }
-        tx.commit()?;
         return Ok(UndoEntry { label: action.label().into(), account_id, before: targets, ops, snooze: None });
     }
 
@@ -248,21 +302,37 @@ pub fn apply(conn: &mut Connection, account_id: i64, conversation_id: &str, acti
 
     let mut ops = Vec::with_capacity(targets.len());
     for m in &targets {
-        local(&tx, m)?;
-        let id = outbox::enqueue(&tx, account_id, Some(&m.remote_id), &remote, GRACE)?;
+        local(tx, m)?;
+        let id = outbox::enqueue(tx, account_id, Some(&m.remote_id), &remote, GRACE)?;
         ops.push((id, m.remote_id.clone(), inverse.clone()));
     }
     drop(local);
-    tx.commit()?;
     Ok(UndoEntry { label: action.label().into(), account_id, before: targets, ops, snooze: None })
 }
 
 /// Reverses an action: cancels ops still waiting in the queue and queues inverse ops
-/// for any that already reached the server.
+/// for any that already reached the server. (The app undoes whole steps, `undo_group`.)
+#[cfg(test)]
 pub fn undo(conn: &mut Connection, entry: &UndoEntry) -> Result<()> {
     let tx = conn.transaction()?;
+    undo_in(&tx, entry)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Reverses a whole undo step, newest change first, in one transaction.
+pub fn undo_group(conn: &mut Connection, group: &UndoGroup) -> Result<()> {
+    let tx = conn.transaction()?;
+    for entry in group.entries.iter().rev() {
+        undo_in(&tx, entry)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn undo_in(tx: &Connection, entry: &UndoEntry) -> Result<()> {
     for m in &entry.before {
-        db::restore_state(&tx, m)?;
+        db::restore_state(tx, m)?;
     }
     if let Some((conversation_id, previous)) = &entry.snooze {
         match previous {
@@ -274,11 +344,10 @@ pub fn undo(conn: &mut Connection, entry: &UndoEntry) -> Result<()> {
         };
     }
     for (outbox_id, remote_id, inverse) in &entry.ops {
-        if !outbox::cancel(&tx, *outbox_id)? {
-            outbox::enqueue(&tx, entry.account_id, Some(remote_id), inverse, std::time::Duration::ZERO)?;
+        if !outbox::cancel(tx, *outbox_id)? {
+            outbox::enqueue(tx, entry.account_id, Some(remote_id), inverse, std::time::Duration::ZERO)?;
         }
     }
-    tx.commit()?;
     Ok(())
 }
 
@@ -472,6 +541,82 @@ mod tests {
             apply(c, a, "c1", Action::MarkRead)?;
             let entry = apply(c, a, "c1", Action::MarkUnread)?;
             assert_eq!(entry.before.iter().map(|m| m.remote_id.as_str()).collect::<Vec<_>>(), vec!["m3"]);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    /// Seeds a second inbox conversation, c2, with one unread message.
+    fn add_c2(c: &Connection, a: i64, inbox: i64) -> Result<()> {
+        db::upsert_message(c, a, inbox, &MessageUpsert {
+            remote_id: "n1".into(), conversation_id: Some("c2".into()), received_at: Some("2026-10-20T10:00:00Z".into()), is_read: Some(false), ..Default::default()
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_batch_acts_on_every_conversation_and_one_undo_reverses_all_of_it() {
+        let (db, a, inbox) = seed();
+        let inbox_count = |c: &Connection| db::list_threads(c, db::Scope::Folder(inbox), &crate::query::compile(""), None, 10).unwrap().len();
+        db.with(|c| {
+            add_c2(c, a, inbox)?;
+            assert_eq!(inbox_count(c), 2);
+            let targets = vec![(a, "c1".to_string()), (a, "c2".to_string()), (a, "missing".to_string())];
+            let entries = apply_many(c, &targets, Action::Archive)?;
+            assert_eq!(entries.len(), 2, "a conversation with nothing to change gets no entry");
+            assert_eq!(inbox_count(c), 0);
+            assert_eq!(queued(c).len(), 4);
+
+            let group = UndoGroup { label: batch_label("Archived", entries.len()), entries };
+            assert_eq!(group.label, "Archived 2 conversations");
+            undo_group(c, &group)?;
+            assert_eq!(inbox_count(c), 2);
+            assert!(queued(c).is_empty(), "pending moves are cancelled, nothing sent");
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_batch_snooze_moves_each_conversation_and_undo_clears_every_snooze() {
+        let (db, a, inbox) = seed();
+        db.with(|c| {
+            add_c2(c, a, inbox)?;
+            let targets = vec![(a, "c1".to_string()), (a, "c2".to_string())];
+            let entries = snooze_many(c, &targets, chrono::Utc::now() + chrono::Duration::hours(3))?;
+            assert_eq!(entries.len(), 2);
+            assert_eq!(list_snoozed(c)?.len(), 2);
+            undo_group(c, &UndoGroup { label: "Snoozed 2 conversations".into(), entries })?;
+            assert!(list_snoozed(c)?.is_empty());
+            assert_eq!(db::list_threads(c, db::Scope::Folder(inbox), &crate::query::compile(""), None, 10)?.len(), 2);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn batch_labels_name_the_count() {
+        assert_eq!(batch_label("Deleted", 1), "Deleted");
+        assert_eq!(batch_label("Marked as read", 5), "Marked as read 5 conversations");
+    }
+
+    #[test]
+    fn undoing_after_the_ops_went_out_queues_every_inverse_and_cancels_nothing_else() {
+        let (db, a, inbox) = seed();
+        db.with(|c| {
+            add_c2(c, a, inbox)?;
+            let entries = apply_many(c, &[(a, "c1".to_string()), (a, "c2".to_string())], Action::Archive)?;
+            // The worker sent every move, emptying the queue...
+            c.execute("DELETE FROM outbox", [])?;
+            // ...then something else was queued (opening a conversation marks it read).
+            let other = outbox::enqueue(c, a, Some("elsewhere"), &Op::SetRead { value: true }, GRACE)?;
+
+            undo_group(c, &UndoGroup { label: "Archived 2 conversations".into(), entries })?;
+            let q = queued(c);
+            assert!(q.iter().any(|(id, _)| id == "elsewhere"), "an unrelated op must survive the undo");
+            let back: Vec<&str> = q.iter().filter(|(_, op)| op.contains("inbox")).map(|(id, _)| id.as_str()).collect();
+            assert_eq!(back.len(), 4, "every archived message is moved back: {q:?}");
+            assert!(other > 0);
             Ok(())
         })
         .unwrap();
