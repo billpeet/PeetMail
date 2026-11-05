@@ -12,7 +12,7 @@
   let input: HTMLInputElement | undefined = $state();
   const presets = snoozePresets();
   const typed = $derived(text.trim() ? parseSendTime(text) : null);
-  const target = mail.snoozeTarget;
+  const targets = mail.snoozeTargets;
 
   function choose(at: Date) {
     mail.snooze(at);
@@ -52,8 +52,10 @@
         class="w-full bg-transparent py-3 text-sm text-ink-100 outline-none select-text"
       />
     </div>
-    {#if target}
-      <p class="truncate border-b border-ink-800 px-4 py-2 text-xs text-ink-500">{target.subject || "(no subject)"}</p>
+    {#if targets.length > 1}
+      <p data-testid="snooze-target" class="truncate border-b border-ink-800 px-4 py-2 text-xs text-ink-500">{targets.length} conversations</p>
+    {:else if targets.length}
+      <p data-testid="snooze-target" class="truncate border-b border-ink-800 px-4 py-2 text-xs text-ink-500">{targets[0].subject || "(no subject)"}</p>
     {/if}
     {#if typed}
       <div class="px-4 py-3 text-sm">

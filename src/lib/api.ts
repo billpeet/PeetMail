@@ -81,6 +81,8 @@ export type MessageRow = {
 /** `moveToInbox`: archived or deleted mail back to the inbox (e in Done, # in Trash). */
 export type Action = "archive" | "trash" | "moveToInbox" | "markRead" | "markUnread" | "flag" | "unflag";
 export type ActionOutcome = { label: string | null; changed: number };
+/** A conversation, as the batch commands take it. */
+export type ThreadRef = { accountId: number; conversationId: string };
 export type DraftKind = "new" | "reply" | "replyAll" | "forward";
 
 /** The mail views the sidebar lists, each across signed-in accounts. */
@@ -296,6 +298,8 @@ export const api = {
     invoke<void>("respond_to_event", { accountId, eventRemoteId, response, series }),
   snoozeThread: (accountId: number, conversationId: string, until: string) =>
     invoke<ActionOutcome>("snooze_thread", { accountId, conversationId, until }),
+  /** Snoozes several conversations as one undo step. */
+  snoozeThreads: (targets: ThreadRef[], until: string) => invoke<ActionOutcome>("snooze_threads", { targets, until }),
   unsnoozeThread: (accountId: number, conversationId: string) => invoke<void>("unsnooze_thread", { accountId, conversationId }),
   listSnoozed: () => invoke<SnoozedThread[]>("list_snoozed"),
   listSnippets: () => invoke<Snippet[]>("list_snippets"),
@@ -309,6 +313,8 @@ export const api = {
   setSignatures: (signatures: Signature[]) => invoke<Signature[]>("set_signatures", { signatures }),
   threadAction: (accountId: number, conversationId: string, action: Action, undoable = true) =>
     invoke<ActionOutcome>("thread_action", { accountId, conversationId, action, undoable }),
+  /** Acts on several conversations (a selection) as one undo step. */
+  threadsAction: (targets: ThreadRef[], action: Action) => invoke<ActionOutcome>("threads_action", { targets, action }),
   undo: () => invoke<string | null>("undo"),
   outboxStatus: () => invoke<OutboxStatus>("outbox_status"),
   sendMessage: (input: SendInput) => invoke<SendOutcome>("send_message", { input }),

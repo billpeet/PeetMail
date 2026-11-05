@@ -24,6 +24,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0012_drafts.sql"),
     include_str!("../migrations/0013_draft_sync.sql"),
     include_str!("../migrations/0014_settings_items.sql"),
+    include_str!("../migrations/0015_outbox_ids.sql"),
 ];
 
 pub struct Db {
@@ -1160,6 +1161,22 @@ mod tests {
         let backup = Connection::open(tmp.0.join("peetmail.db.v3.bak")).unwrap();
         assert_eq!(backup.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
         assert_eq!(get_setting(&backup, "cache_days").unwrap().as_deref(), Some("before"));
+    }
+
+    #[test]
+    fn outbox_ids_survive_the_migration_and_are_never_reused() {
+        let mut c = Connection::open_in_memory().unwrap();
+        migrate_to(&mut c, 14).unwrap();
+        let a = upsert_account(&c, "microsoft", "b@x.com", None, b"t").unwrap().id;
+        c.execute("INSERT INTO outbox (id, account_id, remote_id, op) VALUES (7, ?1, 'm1', '{}')", [a]).unwrap();
+        migrate(&mut c).unwrap();
+        let kept: (i64, String) = c.query_row("SELECT id, remote_id FROM outbox", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(kept, (7, "m1".into()));
+
+        // Emptied, the queue carries on from the highest id it has used.
+        c.execute("DELETE FROM outbox", []).unwrap();
+        let next = crate::outbox::enqueue(&c, a, Some("m2"), &crate::outbox::Op::SetRead { value: true }, std::time::Duration::ZERO).unwrap();
+        assert_eq!(next, 8);
     }
 
     #[test]
