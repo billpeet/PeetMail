@@ -20,7 +20,7 @@ pub enum Action {
     Trash,
     /// Archived and deleted mail back to the inbox ("not done", restore from Trash).
     MoveToInbox,
-    /// Inbox, snoozed and archived mail to Junk (Gmail: reported as spam).
+    /// Inbox, snoozed, archived and deleted mail to Junk (Gmail: reported as spam).
     Spam,
     /// Junk back to the inbox.
     NotSpam,
@@ -249,7 +249,7 @@ fn apply_in(tx: &Connection, account_id: i64, conversation_id: &str, action: Act
         Action::Archive => Some((&["inbox", SNOOZED_ROLE], ("archive", "Archive"))),
         Action::Trash => Some((&["inbox", SNOOZED_ROLE, "archive", JUNK_ROLE], ("deleteditems", "Deleted Items"))),
         Action::MoveToInbox => Some((&["archive", "deleteditems"], ("inbox", "Inbox"))),
-        Action::Spam => Some((&["inbox", SNOOZED_ROLE, "archive"], (JUNK_ROLE, "Junk Email"))),
+        Action::Spam => Some((&["inbox", SNOOZED_ROLE, "archive", "deleteditems"], (JUNK_ROLE, "Junk Email"))),
         Action::NotSpam => Some((&[JUNK_ROLE], ("inbox", "Inbox"))),
         _ => None,
     };
@@ -489,6 +489,13 @@ mod tests {
             let del = apply(c, a, "c1", Action::Trash)?;
             assert_eq!((mailbox(c, db::Mailbox::Junk), mailbox(c, db::Mailbox::Trash)), (0, 1));
             assert!(undo_ops(&del).iter().all(|op| op.contains("\"junkemail\"")));
+            c.execute("DELETE FROM outbox", [])?;
+
+            // ! in Trash: to Junk, and its undo goes back to Trash.
+            let from_trash = apply(c, a, "c1", Action::Spam)?;
+            assert_eq!(from_trash.before.len(), 3);
+            assert_eq!((mailbox(c, db::Mailbox::Trash), mailbox(c, db::Mailbox::Junk)), (0, 1));
+            assert!(undo_ops(&from_trash).iter().all(|op| op.contains("\"deleteditems\"")));
             Ok(())
         })
         .unwrap();

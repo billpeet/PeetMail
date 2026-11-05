@@ -944,12 +944,15 @@ pub struct Contact {
     pub address: String,
 }
 
-/// People you've exchanged mail with, best match first: senders plus recipients of mail you sent.
+/// People you've exchanged mail with, best match first: senders (not of junk) plus
+/// recipients of mail you sent.
 pub fn suggest_contacts(conn: &Connection, prefix: &str, limit: i64) -> Result<Vec<Contact>> {
     let like = format!("%{}%", prefix.to_lowercase());
     let mut stmt = conn.prepare_cached(
         "WITH people AS (
-           SELECT from_name AS name, lower(from_address) AS address FROM messages WHERE from_address IS NOT NULL
+           SELECT m.from_name AS name, lower(m.from_address) AS address
+           FROM messages m JOIN folders f ON f.id = m.folder_id
+           WHERE m.from_address IS NOT NULL AND COALESCE(f.role, '') <> 'junkemail'
            UNION ALL
            SELECT json_extract(j.value, '$.name'), lower(json_extract(j.value, '$.address'))
            FROM messages m JOIN folders f ON f.id = m.folder_id, json_each(m.to_json) j
@@ -1650,6 +1653,28 @@ mod tests {
             assert_eq!(convs(Mailbox::Done), ["c-done"]);
             assert!(convs(Mailbox::Trash).is_empty());
             assert_eq!(convs(Mailbox::All), ["c-inbox", "c-sent", "c-done"]);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn junk_senders_are_not_suggested_as_contacts() {
+        let (db, a, inbox) = seed();
+        db.with(|c| {
+            let junk = ensure_local_folder(c, a, JUNK_ROLE, "Junk Email")?.id;
+            let from = |id: &str, address: &str| MessageUpsert {
+                from_name: Some(address.into()),
+                from_address: Some(address.into()),
+                ..msg(id, id, "2026-10-01T10:00:00Z", true)
+            };
+            upsert_message(c, a, inbox, &from("i1", "sam@contoso.com"))?;
+            for i in 0..3 {
+                upsert_message(c, a, junk, &from(&format!("j{i}"), "sales@scam.example"))?;
+            }
+            let found = |p: &str| suggest_contacts(c, p, 8).unwrap().into_iter().map(|x| x.address).collect::<Vec<_>>();
+            assert_eq!(found("sam"), ["sam@contoso.com"]);
+            assert!(found("scam").is_empty());
             Ok(())
         })
         .unwrap();
