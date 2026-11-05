@@ -4,10 +4,11 @@
   import { formatSendAt, mail } from "#lib/mail.svelte.js";
   import { listDate, senderName } from "#lib/format.js";
   import type { ThreadRow } from "#lib/api.js";
+  import { keyOf } from "#lib/selection.js";
 
   /** In Snoozed, rows show when they come back instead of when they arrived. */
   const until = (t: ThreadRow): string | null => ("until" in t && typeof t.until === "string" ? t.until : null);
-  import { AlarmClock, Archive, Flag, Mail, MailOpen, Paperclip, Trash2 } from "@lucide/svelte";
+  import { AlarmClock, Archive, Check, Flag, Mail, MailOpen, Paperclip, Trash2 } from "@lucide/svelte";
 
   // One line per row in the list layout; three (sender + date, subject, preview) in the
   // narrower preview layout, like Outlook.
@@ -32,6 +33,13 @@
 
   /** A conversation with a reply or forward drafted (here, in Outlook or in Gmail). */
   const hasDraft = (t: ThreadRow) => t.draftId === undefined && !!mail.draftFor(t.accountId, t.conversationId);
+
+  /** Ctrl+click adds a row to the selection (or takes it out), Shift+click a range; a plain click opens it. */
+  function onRowClick(e: MouseEvent, index: number) {
+    if (e.ctrlKey || e.metaKey) mail.toggleChecked(index);
+    else if (e.shiftKey) mail.checkRangeTo(index);
+    else mail.openAt(index);
+  }
 
   function onScroll() {
     if (!viewport) return;
@@ -58,6 +66,7 @@
         {@const index = start + i}
         {@const selected = index === mail.selected}
         {@const unread = t.unreadCount > 0}
+        {@const checked = mail.checked.has(keyOf(t))}
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <div
           role="option"
@@ -66,21 +75,22 @@
           data-account-id={t.accountId}
           data-unread={unread}
           data-draft={t.draftId !== undefined}
+          data-checked={checked}
           tabindex="-1"
           aria-selected={selected}
-          onclick={() => mail.openAt(index)}
+          onclick={(e) => onRowClick(e, index)}
           style:top="{index * ROW}px"
           style:height="{ROW}px"
           class={[
             "group absolute inset-x-0 flex cursor-pointer items-center gap-4 border-l-2 px-5 text-sm",
-            selected ? "border-accent bg-ink-800" : "border-transparent hover:bg-ink-900",
+            selected ? "border-accent bg-ink-800" : checked ? "border-transparent bg-accent/10 hover:bg-accent/15" : "border-transparent hover:bg-ink-900",
           ]}
         >
           {#if mail.previewing}
             <span class="flex min-w-0 flex-1 flex-col gap-0.5 py-2">
               <span class="flex items-baseline gap-2">
                 <span class={["min-w-0 flex-1 truncate", unread ? "font-semibold text-ink-100" : "text-ink-300"]}>
-                  {#if mail.accounts.length > 1}<span data-testid="row-account" title={mail.accountOf(t.accountId)?.email} class={["mr-2 inline-block size-2 rounded-full align-middle", mail.accountColor(t.accountId)]}></span>{/if}{@render who(t)}
+                  {#if checked}<span data-testid="row-checked" title="Selected" class="mr-1.5 inline-block align-[-2px] text-accent"><Check size={14} strokeWidth={3} /></span>{/if}{#if mail.accounts.length > 1}<span data-testid="row-account" title={mail.accountOf(t.accountId)?.email} class={["mr-2 inline-block size-2 rounded-full align-middle", mail.accountColor(t.accountId)]}></span>{/if}{@render who(t)}
                   {#if t.messageCount > 1}<span class="ml-1 text-xs font-normal text-ink-500">{t.messageCount}</span>{/if}
                 </span>
                 {#if t.reminder}<span data-testid="thread-reminder" class="text-xs text-accent" title="Back from a snooze">Reminder</span>{/if}
@@ -97,7 +107,7 @@
             </span>
           {:else}
             <span class={["w-48 shrink-0 truncate", unread ? "font-semibold text-ink-100" : "text-ink-300"]}>
-              {#if mail.accounts.length > 1}<span data-testid="row-account" title={mail.accountOf(t.accountId)?.email} class={["mr-2 inline-block size-2 rounded-full align-middle", mail.accountColor(t.accountId)]}></span>{/if}{@render who(t)}
+              {#if checked}<span data-testid="row-checked" title="Selected" class="mr-1.5 inline-block align-[-2px] text-accent"><Check size={14} strokeWidth={3} /></span>{/if}{#if mail.accounts.length > 1}<span data-testid="row-account" title={mail.accountOf(t.accountId)?.email} class={["mr-2 inline-block size-2 rounded-full align-middle", mail.accountColor(t.accountId)]}></span>{/if}{@render who(t)}
               {#if t.messageCount > 1}<span class="ml-1 text-xs font-normal text-ink-500">{t.messageCount}</span>{/if}
             </span>
             <span class="min-w-0 flex-1 truncate">

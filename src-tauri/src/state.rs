@@ -65,7 +65,7 @@ pub struct AppState {
     /// Held while the outbox worker drains, so only one drain runs.
     pub outbox_lock: tokio::sync::Mutex<()>,
     /// Most recent undoable actions, newest last.
-    pub undo: std::sync::Mutex<Vec<crate::actions::UndoEntry>>,
+    pub undo: std::sync::Mutex<Vec<crate::actions::UndoGroup>>,
     /// Held while bodies are prefetched in the background, so runs don't pile up.
     pub prefetch_lock: tokio::sync::Mutex<()>,
     /// Held while drafts are pushed to or pulled from a server, so a pull never sees a

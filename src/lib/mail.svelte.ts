@@ -28,6 +28,7 @@ import type { Snippet } from "./snippets";
 import { hasOwnText, startingSignature, withSignature } from "./signatures";
 import { calendar } from "./calendar.svelte";
 import { visibility } from "./accounts.svelte";
+import * as selection from "./selection";
 
 const PAGE = 200;
 /** Load the next page when the selection gets this close to the end. */
@@ -186,6 +187,7 @@ class MailStore {
       return;
     }
     this.selected = 0;
+    this.clearChecked();
     await Promise.all([this.refresh(), calendar.refresh()]);
   }
 
@@ -224,6 +226,8 @@ class MailStore {
   pinned = $state.raw<ThreadRow | null>(null);
   current = $derived(this.pinned ?? this.threads[this.selected] ?? null);
   recent = $state.raw<RecentOpen[]>([]);
+  /** Conversations selected for acting on together (x, Shift+J/K, Ctrl+A), by `selection.keyOf`. */
+  checked = $state.raw<Set<string>>(new Set());
 
   view = $state<View>("list");
   overlay = $state<Overlay>(null);
@@ -275,8 +279,8 @@ class MailStore {
   signatures = $state.raw<Signature[]>([]);
   /** Snoozed conversations, soonest back first. */
   snoozed = $state.raw<SnoozedThread[]>([]);
-  /** The conversation the snooze picker acts on. */
-  snoozeTarget = $state.raw<ThreadRow | null>(null);
+  /** The conversations the snooze picker acts on (one, or a selection). */
+  snoozeTargets = $state.raw<ThreadRow[]>([]);
   /** Messages scheduled to send later, soonest first. */
   scheduled = $state.raw<QueuedSend[]>([]);
   /** The send that `z` takes back while its toast is up. */
@@ -294,7 +298,7 @@ class MailStore {
    */
   #listSeq = 0;
   #exhausted = false;
-  #loadingMore = false;
+  #loadingMore: Promise<void> | null = null;
   #refreshTimer: ReturnType<typeof setTimeout> | undefined;
   #prefetchTimer: ReturnType<typeof setTimeout> | undefined;
   #toastTimer: ReturnType<typeof setTimeout> | undefined;
@@ -546,6 +550,7 @@ class MailStore {
     this.#exhausted = this.#special !== null || rows.length < count;
     rows = this.#mergeDrafts(rows, this.#exhausted);
     this.threads = rows;
+    this.checked = selection.prune(this.checked, rows);
     const idx = keep ? rows.findIndex((t) => t.conversationId === keep) : -1;
     this.selected = idx >= 0 ? idx : Math.min(this.selected, Math.max(0, rows.length - 1));
     this.#schedulePrefetch();
@@ -566,21 +571,95 @@ class MailStore {
     }
   }
 
-  async loadMore() {
-    if (!this.account || this.#exhausted || this.#loadingMore) return;
+  /** Loads the next page (or waits for the one already loading). */
+  loadMore(): Promise<void> {
+    if (this.#loadingMore) return this.#loadingMore;
+    if (!this.account || this.#exhausted) return Promise.resolve();
     const last = this.threads.findLast((t) => t.draftId === undefined);
-    if (!last) return;
-    this.#loadingMore = true;
+    if (!last) return Promise.resolve();
     const seq = this.#listSeq;
-    try {
+    const run = (async () => {
       const { mailbox, query, split } = this.listQuery;
       const rows = await api.listThreads(mailbox, query, split, { sortAt: last.sortAt, messageId: last.messageId }, PAGE, this.hiddenIds);
       if (seq !== this.#listSeq) return; // the list was reloaded meanwhile
       this.#exhausted = rows.length < PAGE;
       this.threads = this.#mergeDrafts([...this.threads, ...rows], this.#exhausted);
-    } finally {
-      this.#loadingMore = false;
+    })().finally(() => (this.#loadingMore = null));
+    this.#loadingMore = run;
+    return run;
+  }
+
+  // ---------- selecting several conversations ----------
+
+  /** The selected conversations, in list order. Only the list acts on them, not the reader. */
+  get batch(): ThreadRow[] {
+    return this.view === "list" ? selection.pick(this.checked, this.threads) : [];
+  }
+
+  /** e, #, u, s and h act on the selection rather than the cursor's conversation. */
+  get batching(): boolean {
+    return this.batch.length > 0;
+  }
+
+  clearChecked() {
+    if (this.checked.size) this.checked = new Set();
+  }
+
+  /** x: selects the cursor's conversation, or takes it out of the selection. */
+  toggleChecked(index = this.selected) {
+    const t = this.threads[index];
+    if (!t) return;
+    if (t.draftId !== undefined) return this.showToast({ text: "That's a draft: Enter opens it, # discards it" });
+    this.checked = selection.toggle(this.checked, t);
+  }
+
+  /** Shift+J / Shift+K: selects the cursor's conversation and the next (previous) one, moving onto it. */
+  extendChecked(delta: 1 | -1) {
+    if (!this.threads.length) return;
+    const from = this.selected;
+    const to = Math.max(0, Math.min(from + delta, this.threads.length - 1));
+    this.checked = selection.addRange(this.checked, this.threads, from, to);
+    this.move(to - from);
+  }
+
+  /** Shift+click: selects everything from the cursor to `index`, moving the cursor there. */
+  checkRangeTo(index: number) {
+    this.checked = selection.addRange(this.checked, this.threads, this.selected, index);
+    this.select(index);
+  }
+
+  /** Ctrl+A: every conversation in the view, loading the rest of the list first. */
+  async checkAll() {
+    const seq = this.#listSeq;
+    while (!this.#exhausted && seq === this.#listSeq) {
+      const before = this.threads.length;
+      await this.loadMore();
+      if (this.threads.length === before) break;
     }
+    if (seq !== this.#listSeq) return; // the view changed meanwhile
+    this.checked = selection.all(this.threads);
+  }
+
+  /** Acts on every selected conversation as one undo step. */
+  async #actOnBatch(rows: ThreadRow[], action: Action) {
+    try {
+      const out = await api.threadsAction(rows.map(ref), action);
+      const removal = action === "archive" || action === "trash" || action === "moveToInbox";
+      // Those leave the list; read and flag keep the selection, so u then e works.
+      if (removal) this.checked = new Set();
+      this.showToast(out.label ? { text: out.label, undo: true } : { text: "Nothing to change" });
+      await this.refresh();
+      if (removal) await this.#afterRemoval();
+    } catch (e) {
+      this.showToast({ text: String(e), error: true });
+    }
+  }
+
+  /** e and # from the keyboard: the selection if there is one, else the current conversation. */
+  async triage(action: Action) {
+    const rows = this.batch;
+    if (rows.length) return this.#actOnBatch(rows, action);
+    return this.act(action);
   }
 
   select(index: number) {
@@ -600,6 +679,7 @@ class MailStore {
   async open() {
     const t = this.current;
     if (!t) return;
+    this.clearChecked(); // the reader acts on the one conversation it shows
     if (t.draftId !== undefined) return this.#openDraftRow(t.draftId);
     const nav = this.#navSeq;
     // Load the thread first (a local query) so the reader never flashes empty or stale.
@@ -643,7 +723,8 @@ class MailStore {
     this.threadFor = t.conversationId;
     this.#loadInvite();
     this.#dwellTimer = setTimeout(() => {
-      if (this.current?.conversationId !== t.conversationId || !this.previewing) return;
+      // A selection covers the reading pane: the conversation wasn't on screen.
+      if (this.current?.conversationId !== t.conversationId || !this.previewing || this.batching) return;
       api.recordOpen(t.accountId, t.conversationId).then(async () => (this.recent = await api.recentOpens()));
       if (t.unreadCount > 0) this.act("markRead", { undoable: false, quiet: true });
     }, PREVIEW_DWELL_MS);
@@ -689,6 +770,7 @@ class MailStore {
 
   /** Shows a mailbox (Inbox opens on the tab you were on). */
   async goTo(mailbox: MailView) {
+    this.clearChecked();
     this.search = null;
     this.pinned = null;
     if (this.mailbox !== mailbox) {
@@ -706,6 +788,7 @@ class MailStore {
   async switchSplit(index: number) {
     if (!this.splits.length) return;
     this.search = null;
+    this.clearChecked();
     this.mailbox = "inbox";
     this.splitIndex = (index + this.splits.length) % this.splits.length;
     this.selected = 0;
@@ -730,6 +813,7 @@ class MailStore {
 
   setSearch(text: string) {
     this.search = text;
+    this.clearChecked();
     clearTimeout(this.#searchTimer);
     this.#searchTimer = setTimeout(() => {
       this.selected = 0;
@@ -740,6 +824,7 @@ class MailStore {
   async endSearch() {
     if (this.search === null) return;
     this.search = null;
+    this.clearChecked();
     this.selected = 0;
     await this.refresh();
   }
@@ -781,24 +866,31 @@ class MailStore {
 
   // ---------- snooze ----------
 
-  /** Opens the snooze picker for `t` (default: the current conversation). */
-  startSnooze(t: ThreadRow | null = this.current) {
-    if (!t) return;
-    if (t.draftId !== undefined) return this.showToast({ text: "That's a draft: Enter opens it, # discards it" });
-    this.snoozeTarget = t;
+  /** Opens the snooze picker for `t` (default: the selection, else the current conversation). */
+  startSnooze(t: ThreadRow | null = null) {
+    const targets = t ? [t] : this.batching ? this.batch : this.current ? [this.current] : [];
+    if (!targets.length) return;
+    if (targets.length === 1 && targets[0].draftId !== undefined) return this.showToast({ text: "That's a draft: Enter opens it, # discards it" });
+    this.snoozeTargets = targets;
     this.overlay = "snooze";
   }
 
   async snooze(until: Date) {
-    const t = this.snoozeTarget;
-    if (!t) return;
-    const wasCurrent = this.current?.conversationId === t.conversationId && this.current?.accountId === t.accountId;
+    const targets = this.snoozeTargets;
+    if (!targets.length) return;
+    const cur = this.current;
+    const wasCurrent = !!cur && targets.some((t) => t.conversationId === cur.conversationId && t.accountId === cur.accountId);
     // Close at once, so keys typed straight after (g h, j) aren't swallowed by the dialog.
     if (this.overlay === "snooze") this.overlay = null;
-    this.snoozeTarget = null;
+    this.snoozeTargets = [];
     try {
-      const out = await api.snoozeThread(t.accountId, t.conversationId, until.toISOString());
-      if (out.label) this.showToast({ text: `Snoozed until ${formatSendAt(until.toISOString())}`, undo: true });
+      const batch = targets.length > 1;
+      const out = batch
+        ? await api.snoozeThreads(targets.map(ref), until.toISOString())
+        : await api.snoozeThread(targets[0].accountId, targets[0].conversationId, until.toISOString());
+      if (batch) this.clearChecked();
+      const what = out.changed > 1 ? ` ${out.changed} conversations` : "";
+      if (out.label) this.showToast({ text: `Snoozed${what} until ${formatSendAt(until.toISOString())}`, undo: true });
       await this.refresh();
       this.refreshSnoozed();
       if (wasCurrent) await this.#afterRemoval();
@@ -807,12 +899,14 @@ class MailStore {
     }
   }
 
-  /** Wakes a snoozed conversation now (u in Snoozed). */
-  async unsnooze(t: ThreadRow | null = this.current) {
-    if (!t) return;
+  /** Wakes snoozed conversations now (u in Snoozed): the selection, else the current one. */
+  async unsnooze(t: ThreadRow | null = null) {
+    const targets = t ? [t] : this.batching ? this.batch : this.current ? [this.current] : [];
+    if (!targets.length) return;
     try {
-      await api.unsnoozeThread(t.accountId, t.conversationId);
-      this.showToast({ text: "Back in your inbox" });
+      for (const x of targets) await api.unsnoozeThread(x.accountId, x.conversationId);
+      this.clearChecked();
+      this.showToast({ text: targets.length > 1 ? `${targets.length} conversations back in your inbox` : "Back in your inbox" });
       await this.refresh();
       this.refreshSnoozed();
       await this.#afterRemoval();
@@ -884,11 +978,13 @@ class MailStore {
   }
 
   async toggleRead() {
+    if (this.batching) return this.triage(selection.readActionFor(this.batch));
     const t = this.current;
     if (t) await this.act(t.unreadCount > 0 ? "markRead" : "markUnread");
   }
 
   async toggleFlag() {
+    if (this.batching) return this.triage(selection.flagActionFor(this.batch));
     const t = this.current;
     if (t) await this.act(t.isFlagged ? "unflag" : "flag");
   }
@@ -1186,6 +1282,8 @@ class MailStore {
 }
 
 export const mail = new MailStore();
+
+const ref = (t: ThreadRow) => ({ accountId: t.accountId, conversationId: t.conversationId });
 
 /** "Tue 27 Oct, 8:00 am" (today's sends drop the date). */
 export function formatSendAt(iso: string, now = new Date()): string {

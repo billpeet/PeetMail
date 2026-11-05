@@ -297,6 +297,38 @@ fn mail_changed(app: &AppHandle, account_id: i64) {
     let _ = app.emit(mail::EVENT_MAIL_CHANGED, serde_json::json!({ "accountId": account_id, "folderId": null }));
 }
 
+/// Adds a step to the undo stack (keeping the last 50).
+fn push_undo(state: &AppState, group: actions::UndoGroup) {
+    let mut undo = state.undo.lock().expect("undo mutex");
+    undo.push(group);
+    let excess = undo.len().saturating_sub(50);
+    undo.drain(..excess);
+}
+
+/// Tells the UI and the outbox that local mail changed in these accounts.
+fn after_triage(app: &AppHandle, state: &AppState, accounts: impl IntoIterator<Item = i64>) {
+    outbox::emit_status(app, state);
+    outbox::kick(app);
+    let mut seen = std::collections::HashSet::new();
+    for a in accounts {
+        if seen.insert(a) {
+            mail_changed(app, a);
+        }
+    }
+}
+
+/// A conversation named by the UI.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadRef {
+    account_id: i64,
+    conversation_id: String,
+}
+
+fn thread_refs(targets: Vec<ThreadRef>) -> Vec<(i64, String)> {
+    targets.into_iter().map(|t| (t.account_id, t.conversation_id)).collect()
+}
+
 /// Applies a triage action to a conversation. Local state changes immediately; the
 /// server catches up through the outbox.
 #[tauri::command]
@@ -312,17 +344,35 @@ pub fn thread_action(
     let changed = entry.before.len();
     let label = (changed > 0).then(|| entry.label.clone());
     if changed > 0 && undoable.unwrap_or(true) {
-        let mut undo = state.undo.lock().expect("undo mutex");
-        undo.push(entry);
-        let excess = undo.len().saturating_sub(50);
-        undo.drain(..excess);
+        push_undo(&state, actions::UndoGroup { label: entry.label.clone(), entries: vec![entry] });
     }
     if changed > 0 {
-        outbox::emit_status(&app, &state);
-        outbox::kick(&app);
-        mail_changed(&app, account_id);
+        after_triage(&app, &state, [account_id]);
     }
     Ok(ActionOutcome { label, changed })
+}
+
+/// Applies a triage action to several conversations at once (a selection), as one undo
+/// step. `changed` counts the conversations that changed.
+#[tauri::command]
+pub fn threads_action(app: AppHandle, state: State<'_, AppState>, targets: Vec<ThreadRef>, action: Action) -> Result<ActionOutcome> {
+    let targets = thread_refs(targets);
+    let entries = state.db.with(|c| actions::apply_many(c, &targets, action))?;
+    let changed = entries.len();
+    let Some(first) = entries.first() else { return Ok(ActionOutcome { label: None, changed: 0 }) };
+    let label = actions::batch_label(&first.label, changed);
+    let accounts: Vec<i64> = entries.iter().map(|e| e.account_id).collect();
+    push_undo(&state, actions::UndoGroup { label: label.clone(), entries });
+    after_triage(&app, &state, accounts);
+    Ok(ActionOutcome { label: Some(label), changed })
+}
+
+fn parse_snooze_time(until: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    let until = chrono::DateTime::parse_from_rfc3339(until).map_err(|_| AppError::Other(format!("\"{until}\" isn't a time")))?.with_timezone(&chrono::Utc);
+    if until <= chrono::Utc::now() {
+        return Err(AppError::Other("that time has already passed".into()));
+    }
+    Ok(until)
 }
 
 /// Snoozes a conversation until `until` (RFC 3339). Undoable like any triage action.
@@ -334,22 +384,29 @@ pub fn snooze_thread(
     conversation_id: String,
     until: String,
 ) -> Result<ActionOutcome> {
-    let until = chrono::DateTime::parse_from_rfc3339(&until).map_err(|_| AppError::Other(format!("\"{until}\" isn't a time")))?.with_timezone(&chrono::Utc);
-    if until <= chrono::Utc::now() {
-        return Err(AppError::Other("that time has already passed".into()));
-    }
+    let until = parse_snooze_time(&until)?;
     let entry = state.db.with(|c| actions::snooze(c, account_id, &conversation_id, until))?;
     let changed = entry.snooze.is_some() as usize;
     if changed > 0 {
-        let mut undo = state.undo.lock().expect("undo mutex");
-        undo.push(entry);
-        let excess = undo.len().saturating_sub(50);
-        undo.drain(..excess);
+        push_undo(&state, actions::UndoGroup { label: entry.label.clone(), entries: vec![entry] });
     }
-    outbox::emit_status(&app, &state);
-    outbox::kick(&app);
-    mail_changed(&app, account_id);
+    after_triage(&app, &state, [account_id]);
     Ok(ActionOutcome { label: (changed > 0).then(|| "Snoozed".into()), changed })
+}
+
+/// Snoozes several conversations until `until`, as one undo step.
+#[tauri::command]
+pub fn snooze_threads(app: AppHandle, state: State<'_, AppState>, targets: Vec<ThreadRef>, until: String) -> Result<ActionOutcome> {
+    let until = parse_snooze_time(&until)?;
+    let targets = thread_refs(targets);
+    let entries = state.db.with(|c| actions::snooze_many(c, &targets, until))?;
+    let changed = entries.len();
+    let label = (changed > 0).then(|| actions::batch_label("Snoozed", changed));
+    if let Some(label) = &label {
+        push_undo(&state, actions::UndoGroup { label: label.clone(), entries });
+    }
+    after_triage(&app, &state, targets.iter().map(|t| t.0));
+    Ok(ActionOutcome { label, changed })
 }
 
 /// Brings a snoozed conversation back to the inbox now.
@@ -589,12 +646,10 @@ pub fn list_snoozed(state: State<'_, AppState>) -> Result<Vec<actions::SnoozedTh
 /// Undoes the most recent action. Returns its label ("Archived") or None if nothing to undo.
 #[tauri::command]
 pub fn undo(app: AppHandle, state: State<'_, AppState>) -> Result<Option<String>> {
-    let Some(entry) = state.undo.lock().expect("undo mutex").pop() else { return Ok(None) };
-    state.db.with(|c| actions::undo(c, &entry))?;
-    outbox::emit_status(&app, &state);
-    outbox::kick(&app);
-    mail_changed(&app, entry.account_id);
-    Ok(Some(entry.label))
+    let Some(group) = state.undo.lock().expect("undo mutex").pop() else { return Ok(None) };
+    state.db.with(|c| actions::undo_group(c, &group))?;
+    after_triage(&app, &state, group.entries.iter().map(|e| e.account_id));
+    Ok(Some(group.label))
 }
 
 #[tauri::command]
