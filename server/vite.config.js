@@ -10,6 +10,11 @@ export default defineConfig({
     sveltekit({
       preprocess: vitePreprocess(),
       adapter: adapter(),
+      // SvelteKit's CSRF check takes any POST/PUT/DELETE without a JSON body (a bodyless
+      // DELETE, say) for a form submission and refuses it unless its Origin matches. Every
+      // call here is authenticated by a bearer token, never a cookie, so there's nothing for
+      // CSRF to ride on; and PeetMail sends no Origin. Revisit if a web client uses cookies.
+      csrf: { trustedOrigins: ["*"] },
     }),
   ],
   test: {
