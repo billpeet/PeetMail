@@ -1373,7 +1373,7 @@ mod tests {
             let convs: Vec<&str> = rows.iter().map(|t| t.conversation_id.as_str()).collect();
             assert_eq!(convs, ["c1", "c2"]);
             assert_eq!(rows[1].message_count, 1, "m3 is in c2's conversation but not a hit");
-            assert_eq!(get_thread(c, a, "c2", false)?.len(), 2, "the reader shows the whole conversation");
+            assert_eq!(get_thread(c, a, "c2", None)?.len(), 2, "the reader shows the whole conversation");
 
             // Closing the search drops what it added and keeps what was cached.
             assert_eq!(clear_search_cache(c)?, 2);

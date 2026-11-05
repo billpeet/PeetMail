@@ -412,8 +412,8 @@ pub async fn fetch_conversation(state: &AppState, account_id: i64, conversation_
     keep_search_results(state, account_id, &page, false, generation)
 }
 
-/// Stores search results in the folders they're in: mail in Deleted Items is left out (like
-/// local search) and so are drafts; mail in folders PeetMail doesn't sync counts as archived.
+/// Stores search results in the folders they're in: mail in Deleted Items and Junk is left
+/// out (like local search) and so are drafts; mail in folders PeetMail doesn't sync counts as archived.
 fn keep_search_results(state: &AppState, account_id: i64, page: &Value, hit: bool, generation: u64) -> Result<usize> {
     let items = page["value"].as_array().cloned().unwrap_or_default();
     state.db.with(|c| {
@@ -431,7 +431,7 @@ fn keep_search_results(state: &AppState, account_id: i64, page: &Value, hit: boo
             let parent = v["parentFolderId"].as_str();
             let folder = folders.iter().find(|f| parent == Some(f.remote_id.as_str()));
             let folder_id = match folder {
-                Some(f) if f.role.as_deref() == Some("deleteditems") => continue,
+                Some(f) if matches!(f.role.as_deref(), Some("deleteditems" | db::JUNK_ROLE)) => continue,
                 Some(f) if f.role.is_some() => f.id,
                 _ => db::ensure_local_folder(&tx, account_id, "archive", "Archive")?.id,
             };

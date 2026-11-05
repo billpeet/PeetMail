@@ -775,7 +775,7 @@ fn keep_search_results(state: &AppState, account_id: i64, fetched: &[(String, Re
         let tx = c.transaction()?;
         let mut kept = 0;
         for (role, m) in &parsed {
-            let Some(role) = role.filter(|r| *r != "deleteditems") else { continue };
+            let Some(role) = role.filter(|r| !matches!(*r, "deleteditems" | db::JUNK_ROLE)) else { continue };
             let folder = db::ensure_local_folder(&tx, account_id, role, folder_name(role))?;
             db::keep_search_result(&tx, account_id, folder.id, m, hit)?;
             kept += 1;
