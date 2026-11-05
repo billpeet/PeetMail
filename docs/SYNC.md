@@ -56,7 +56,7 @@ Diagnostics (`support.rs`) show settings keys containing `:` as a count per pref
 
 ### On the client
 
-Migration `0015_sync.sql`:
+A migration (the next free number in `src-tauri/migrations`) adds:
 
 ```sql
 CREATE TABLE sync_items (
