@@ -23,6 +23,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0011_draft_files.sql"),
     include_str!("../migrations/0012_drafts.sql"),
     include_str!("../migrations/0013_draft_sync.sql"),
+    include_str!("../migrations/0014_settings_items.sql"),
 ];
 
 pub struct Db {
@@ -156,12 +157,27 @@ pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
 }
 
 pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    debug_assert!(crate::sync::scope(key).is_some(), "setting {key:?} isn't classified as synced or local in sync.rs");
     conn.execute(
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
          ON CONFLICT (key) DO UPDATE SET value = excluded.value",
         params![key, value],
     )?;
     Ok(())
+}
+
+pub fn delete_setting(conn: &Connection, key: &str) -> Result<()> {
+    conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+    Ok(())
+}
+
+/// Every setting whose key starts with `prefix`, as (key without the prefix, value), by key.
+pub fn settings_with_prefix(conn: &Connection, prefix: &str) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare("SELECT key, value FROM settings WHERE substr(key, 1, ?2) = ?1 ORDER BY key")?;
+    let rows = stmt
+        .query_map(params![prefix, prefix.chars().count() as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows.into_iter().map(|(k, v)| (k[prefix.len()..].to_string(), v)).collect())
 }
 
 // ---------- models ----------
@@ -991,6 +1007,106 @@ mod tests {
         crate::drafts::save(&c, Some(1), 1, &crate::drafts::DraftDoc { subject: "New".into(), ..Default::default() }).unwrap();
     }
 
+    /// A database from before item-shaped settings (schema 13), with `old` as raw settings
+    /// (written directly: those keys are no longer valid for set_setting), migrated.
+    fn migrated_from_13(old: &[(&str, &str)]) -> Connection {
+        let mut c = Connection::open_in_memory().unwrap();
+        migrate_to(&mut c, 13).unwrap();
+        for (k, v) in old {
+            c.execute("INSERT INTO settings (key, value) VALUES (?1, ?2)", [k, v]).unwrap();
+        }
+        migrate(&mut c).unwrap();
+        c
+    }
+
+    fn json_settings(c: &Connection, prefix: &str) -> Vec<(String, serde_json::Value)> {
+        settings_with_prefix(c, prefix).unwrap().into_iter().map(|(k, v)| (k, serde_json::from_str(&v).unwrap())).collect()
+    }
+
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct NameQuery {
+        name: String,
+        query: String,
+    }
+
+    #[test]
+    fn splits_become_one_setting_each_in_their_order() {
+        let c = migrated_from_13(&[(
+            "splits",
+            r#"[{"name":"Important","query":"is:focused"},{"name":"Boss","query":"from:boss@contoso.com"},{"name":"Other","query":"is:other"},{"name":7},"junk"]"#,
+        )]);
+        let splits: Vec<NameQuery> = crate::items::load_ordered(&c, "split:").unwrap().into_iter().map(|(_, s)| s).collect();
+        // The old Important default goes (it would claim nearly all mail); bad entries are skipped.
+        assert_eq!(
+            splits,
+            [
+                NameQuery { name: "Boss".into(), query: "from:boss@contoso.com".into() },
+                NameQuery { name: "Other".into(), query: "is:other".into() }
+            ]
+        );
+        assert_eq!(get_setting(&c, "splits").unwrap(), None);
+        assert_eq!(get_setting(&c, "split:other").unwrap(), None, "the fixed id is only for the default");
+    }
+
+    #[test]
+    fn an_important_split_made_after_the_built_in_inbox_stays() {
+        let c = migrated_from_13(&[("splits", r#"[{"name":"Important","query":"is:focused"}]"#), ("splits_builtin_inbox", "1")]);
+        let splits: Vec<(String, NameQuery)> = crate::items::load_ordered(&c, "split:").unwrap();
+        assert_eq!(splits.len(), 1);
+        assert_eq!(splits[0].1.name, "Important");
+        assert_eq!(get_setting(&c, "splits_builtin_inbox").unwrap(), None);
+    }
+
+    #[test]
+    fn new_and_unreadable_split_lists_get_the_default_other_tab() {
+        for old in [&[][..], &[("splits", "not json")][..], &[("splits", r#"{"name":"x"}"#)][..]] {
+            let c = migrated_from_13(old);
+            let splits: Vec<(String, NameQuery)> = crate::items::load_ordered(&c, "split:").unwrap();
+            assert_eq!(splits, [("other".to_string(), NameQuery { name: "Other".into(), query: "is:other".into() })], "{old:?}");
+        }
+        // An empty list stays empty.
+        let c = migrated_from_13(&[("splits", "[]")]);
+        assert!(settings_with_prefix(&c, "split:").unwrap().is_empty());
+        // And so does a fresh database's: Other comes from the migration, not on every load.
+        let c = Db::open_in_memory().unwrap();
+        assert_eq!(c.with(|c| Ok(settings_with_prefix(c, "split:")?.len())).unwrap(), 1);
+    }
+
+    #[test]
+    fn snippets_and_signatures_become_one_setting_each() {
+        let c = migrated_from_13(&[
+            ("snippets", r#"[{"name":"Thanks","body":"Thanks {first_name}!"},{"name":"intro","body":"Hi"},{"name":"","body":"x"},{"body":"no name"}]"#),
+            (
+                "signatures",
+                r#"[{"address":"priya@fabrikam.io","html":"<p>Priya</p>","replies":true},{"address":"it@contoso.com","html":"","managed":true},{"html":"no address"}]"#,
+            ),
+        ]);
+        assert_eq!(
+            json_settings(&c, "snippet:"),
+            [
+                ("intro".to_string(), serde_json::json!({ "name": "intro", "body": "Hi", "order": 2 })),
+                ("thanks".to_string(), serde_json::json!({ "name": "Thanks", "body": "Thanks {first_name}!", "order": 1 })),
+            ]
+        );
+        assert_eq!(
+            json_settings(&c, "signature:"),
+            [
+                ("it@contoso.com".to_string(), serde_json::json!({ "html": "", "replies": false, "managed": true })),
+                ("priya@fabrikam.io".to_string(), serde_json::json!({ "html": "<p>Priya</p>", "replies": true, "managed": false })),
+            ]
+        );
+        assert_eq!(get_setting(&c, "snippets").unwrap(), None);
+        assert_eq!(get_setting(&c, "signatures").unwrap(), None);
+    }
+
+    #[test]
+    fn unreadable_snippets_and_signatures_dont_stop_the_migration() {
+        let c = migrated_from_13(&[("snippets", "{oops"), ("signatures", "42"), ("layout", "list")]);
+        assert!(settings_with_prefix(&c, "snippet:").unwrap().is_empty());
+        assert!(settings_with_prefix(&c, "signature:").unwrap().is_empty());
+        assert_eq!(get_setting(&c, "layout").unwrap().as_deref(), Some("list"), "other settings are untouched");
+    }
+
     #[test]
     fn changing_an_app_signs_out_only_its_accounts() {
         let db = Db::open_in_memory().unwrap();
@@ -1032,7 +1148,7 @@ mod tests {
         {
             let mut c = Connection::open(&path).unwrap();
             migrate_to(&mut c, 3).unwrap();
-            set_setting(&c, "marker", "before").unwrap();
+            set_setting(&c, "cache_days", "before").unwrap();
         }
 
         let db = Db::open(&path).unwrap();
@@ -1043,7 +1159,7 @@ mod tests {
         assert_eq!(backups(&tmp.0), ["peetmail.db.v3.bak"]);
         let backup = Connection::open(tmp.0.join("peetmail.db.v3.bak")).unwrap();
         assert_eq!(backup.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
-        assert_eq!(get_setting(&backup, "marker").unwrap().as_deref(), Some("before"));
+        assert_eq!(get_setting(&backup, "cache_days").unwrap().as_deref(), Some("before"));
     }
 
     #[test]
@@ -1119,7 +1235,7 @@ mod tests {
         let hit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = db.with(|c| {
                 let tx = c.transaction()?;
-                tx.execute("INSERT INTO settings (key, value) VALUES ('half', 'done')", [])?;
+                tx.execute("INSERT INTO settings (key, value) VALUES ('cache_days', 'done')", [])?;
                 panic!("bug inside a transaction");
                 #[allow(unreachable_code)]
                 Ok(())
@@ -1127,9 +1243,9 @@ mod tests {
         }));
         assert!(hit.is_err());
         // The lock is usable again, and the half-done transaction was rolled back.
-        assert_eq!(db.with(|c| get_setting(c, "half")).unwrap(), None);
-        db.with(|c| set_setting(c, "after", "ok")).unwrap();
-        assert_eq!(db.with(|c| get_setting(c, "after")).unwrap().as_deref(), Some("ok"));
+        assert_eq!(db.with(|c| get_setting(c, "cache_days")).unwrap(), None);
+        db.with(|c| set_setting(c, "cache_days", "ok")).unwrap();
+        assert_eq!(db.with(|c| get_setting(c, "cache_days")).unwrap().as_deref(), Some("ok"));
     }
 
     #[test]

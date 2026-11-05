@@ -255,7 +255,7 @@ Without these, people go back to Outlook or Gmail for routine tasks.
 
 - **Out-of-office replies** (Graph `automaticRepliesSetting`, the Gmail vacation responder), with a footer indicator while on.
 - **Categories and importance**, shown on rows and settable from the keyboard; `categories:` and `is:important` in the query language.
-- **Shared mailboxes and send-as aliases** (M365 delegates, Gmail send-as addresses) in the From picker.
+- **Shared mailboxes and send-as aliases** (M365 delegates, Gmail send-as addresses) in the From picker. Their configuration syncs between devices (`docs/SYNC.md`, stage 5).
 - **Rules.** Show server inbox rules, and "always move mail from this sender to…" from a conversation.
 - **Print / save as PDF** for a conversation.
 - **Find in message** (`ctrl+f`) and zoom for message bodies.
@@ -271,6 +271,7 @@ Without these, people go back to Outlook or Gmail for routine tasks.
 
 ### General
 
+- **Cloud sync** of settings, signatures, snippets, splits and the account list between devices, end-to-end encrypted through a self-hosted server. Planned in `docs/SYNC.md`.
 - A light theme that follows Windows' setting. `theme.test.ts` contrast checks would need a light palette too.
 - Density options (compact rows).
 - An unread-only toggle per view (today only `is:unread` in search or a split).
