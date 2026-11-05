@@ -84,6 +84,15 @@ pub fn unprotect(data: &[u8]) -> Result<Vec<u8>> {
     sealed::open(&linux::key(false)?, data)
 }
 
+/// For unit tests that encrypt: on Linux the key goes in a key file in a temp dir (never the
+/// keyring). The first call sets it up for the whole test run.
+#[cfg(test)]
+pub fn init_for_tests() {
+    let dir = std::env::temp_dir().join(format!("peetmail-secure-tests-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    init(&dir, false);
+}
+
 #[cfg(not(any(windows, target_os = "linux")))]
 pub fn init(_data_dir: &std::path::Path, _keyring: bool) {}
 
