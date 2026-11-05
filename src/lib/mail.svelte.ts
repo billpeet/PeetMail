@@ -31,6 +31,8 @@ import { visibility } from "./accounts.svelte";
 import * as selection from "./selection";
 
 const PAGE = 200;
+/** Most rows `list_threads` returns for one query. */
+const LIST_MAX = 1000;
 /** Load the next page when the selection gets this close to the end. */
 const LOAD_AHEAD = 50;
 const REFRESH_DEBOUNCE_MS = 150;
@@ -438,7 +440,18 @@ class MailStore {
       return all.filter((t) => !this.hiddenIds.includes(t.accountId));
     }
     const { mailbox, query, split } = this.listQuery;
-    return api.listThreads(mailbox, query, split, null, count, this.hiddenIds);
+    // One query returns at most LIST_MAX rows; a list loaded further (Ctrl+A) reloads in chunks.
+    const out: ThreadRow[] = [];
+    let cursor: { sortAt: string; messageId: number } | null = null;
+    while (out.length < count) {
+      const n = Math.min(LIST_MAX, count - out.length);
+      const rows = await api.listThreads(mailbox, query, split, cursor, n, this.hiddenIds);
+      out.push(...rows);
+      const last = rows.at(-1);
+      if (rows.length < n || !last) break;
+      cursor = { sortAt: last.sortAt, messageId: last.messageId };
+    }
+    return out;
   }
 
   /** Conversations opened from Trash show their deleted messages; elsewhere those stay hidden. */
@@ -529,8 +542,17 @@ class MailStore {
     }
   }
 
+  /** A reload in flight: a page loaded meanwhile would land on a list it's about to replace. */
+  #refreshing: Promise<unknown> = Promise.resolve();
+
   /** Reloads everything currently loaded, keeping the selection on the same conversation. */
-  async refresh() {
+  refresh(): Promise<void> {
+    const run = this.#reload();
+    this.#refreshing = run.catch(() => {});
+    return run;
+  }
+
+  async #reload() {
     if (!this.account) return;
     const seq = ++this.#listSeq;
     const folderForSplits = null; // split tabs count the unified inbox
@@ -575,10 +597,12 @@ class MailStore {
   loadMore(): Promise<void> {
     if (this.#loadingMore) return this.#loadingMore;
     if (!this.account || this.#exhausted) return Promise.resolve();
-    const last = this.threads.findLast((t) => t.draftId === undefined);
-    if (!last) return Promise.resolve();
-    const seq = this.#listSeq;
     const run = (async () => {
+      // After a reload already under way, so the page follows the list it produces.
+      await this.#refreshing;
+      const last = this.threads.findLast((t) => t.draftId === undefined);
+      if (this.#exhausted || !last) return;
+      const seq = this.#listSeq;
       const { mailbox, query, split } = this.listQuery;
       const rows = await api.listThreads(mailbox, query, split, { sortAt: last.sortAt, messageId: last.messageId }, PAGE, this.hiddenIds);
       if (seq !== this.#listSeq) return; // the list was reloaded meanwhile
@@ -630,14 +654,20 @@ class MailStore {
 
   /** Ctrl+A: every conversation in the view, loading the rest of the list first. */
   async checkAll() {
-    const seq = this.#listSeq;
-    while (!this.#exhausted && seq === this.#listSeq) {
-      const before = this.threads.length;
+    // Background reloads (a sync, the last action's own) may land meanwhile; only leaving
+    // the view stops it.
+    const view = this.#viewKey;
+    for (let i = 0; i < 10_000 && !this.#exhausted && this.threads.length && view === this.#viewKey; i++) {
       await this.loadMore();
-      if (this.threads.length === before) break;
     }
-    if (seq !== this.#listSeq) return; // the view changed meanwhile
+    await this.#refreshing;
+    if (view !== this.#viewKey) return;
     this.checked = selection.all(this.threads);
+  }
+
+  /** What the list shows; a change means another view. */
+  get #viewKey(): string {
+    return JSON.stringify([this.mailbox, this.splitIndex, this.search, this.hiddenIds]);
   }
 
   /** Acts on every selected conversation as one undo step. */
@@ -699,6 +729,7 @@ class MailStore {
   /** Mouse: click a row to open it (in the preview layout, to preview it). */
   async openAt(index: number) {
     this.pinned = null;
+    this.clearChecked(); // a plain click shows that one conversation
     this.selected = Math.max(0, Math.min(index, this.threads.length - 1));
     if (this.previewing && this.view === "list") await this.preview();
     else await this.open();

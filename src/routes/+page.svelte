@@ -41,6 +41,7 @@
   /** An answerable invite is on screen (reader, or the reading pane). */
   const hasInvite = () =>
     ready() &&
+    !mail.batching &&
     (mail.view === "reader" || mail.previewing) &&
     !!mail.invite &&
     !mail.invite.event.isOrganizer &&
@@ -52,6 +53,8 @@
   const inSnoozed = () => ready() && mail.mailbox === "snoozed" && mail.search === null;
   const inReader = () => ready() && mail.view === "reader";
   const hasThread = () => ready() && !!mail.current;
+  /** One conversation is on screen to answer: not while a selection covers the reading pane. */
+  const hasOne = () => hasThread() && !mail.batching;
   const inInbox = () => ready() && mail.search === null && mail.mailbox === "inbox";
   /** Focus is in a text field (the search box). */
   const typing = () => {
@@ -190,9 +193,9 @@
       { id: "triage.undo", keys: "z", label: "Undo", group: "Triage", when: ready, run: () => mail.undo() },
 
       { id: "compose.new", keys: "c", label: "Compose", group: "Write", when: base, run: () => mail.compose() },
-      { id: "compose.reply", keys: "r", label: "Reply", group: "Write", when: hasThread, run: () => mail.respond("reply") },
-      { id: "compose.replyAll", keys: "a", label: "Reply all", group: "Write", when: hasThread, run: () => mail.respond("replyAll") },
-      { id: "compose.forward", keys: "f", label: "Forward", group: "Write", when: hasThread, run: () => mail.respond("forward") },
+      { id: "compose.reply", keys: "r", label: "Reply", group: "Write", when: hasOne, run: () => mail.respond("reply") },
+      { id: "compose.replyAll", keys: "a", label: "Reply all", group: "Write", when: hasOne, run: () => mail.respond("replyAll") },
+      { id: "compose.forward", keys: "f", label: "Forward", group: "Write", when: hasOne, run: () => mail.respond("forward") },
 
       { id: "layout.toggle", keys: "v", label: "Toggle reading pane", group: "App", when: ready, run: () => mail.toggleLayout() },
       { id: "calendar.pane", keys: "0", label: "Toggle calendar", group: "Calendar", when: base, run: () => mail.toggleCalendarPane() },

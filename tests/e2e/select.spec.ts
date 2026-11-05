@@ -101,7 +101,17 @@ test("in the preview layout the reading pane sums up the selection", async ({ in
   await expect(page.getByTestId("main")).toHaveAttribute("data-layout", "preview");
   await page.keyboard.press("Shift+J");
   await expect(page.getByTestId("selection-summary")).toContainText("2 conversations selected");
+  // r would answer the conversation hidden behind the summary: it does nothing instead.
+  await page.keyboard.press("r");
+  await expect(page.getByTestId("composer")).toHaveCount(0);
   await page.keyboard.press("Escape");
+  await expect(page.getByTestId("selection-summary")).toHaveCount(0);
+  await expect(page.getByTestId("reader")).toBeVisible();
+
+  // A plain click on a row lets go of the selection and shows that conversation.
+  await page.keyboard.press("Shift+J");
+  await expect(page.getByTestId("selection-summary")).toBeVisible();
+  await page.getByTestId("thread-row").nth(3).click();
   await expect(page.getByTestId("selection-summary")).toHaveCount(0);
   await expect(page.getByTestId("reader")).toBeVisible();
 });
