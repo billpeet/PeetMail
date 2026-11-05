@@ -1,6 +1,6 @@
 [package]
 name = "peetmail"
-version = "0.2.0"
+version = "0.2.1"
 description = "PeetMail, a fast keyboard-first mail and calendar client"
 authors = ["Peet Software"]
 license = "MIT"
