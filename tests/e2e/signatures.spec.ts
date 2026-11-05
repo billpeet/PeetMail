@@ -110,6 +110,9 @@ test("replies get the signature only when chosen, and it can be added to one", a
   const html: string = sentOfKind(fake, "reply")[0].html;
   expect(html).toContain(`<div>Sunday works!</div>${SENT_SIG}</div></div>`);
   expect(html.indexOf("<strong>Boris Dragon</strong>")).toBeLessThan(html.indexOf("<blockquote>"));
+  // The fake can have the reply before the composer closes; until then it has the keys and
+  // Ctrl+, does nothing.
+  await expect(page.getByTestId("composer")).toHaveCount(0);
 
   // With "replies and forwards too", it's there from the start.
   await openSettings(page, "mail");
