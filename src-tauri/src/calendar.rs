@@ -673,7 +673,7 @@ pub fn remove(conn: &Connection, account_id: i64, remote_id: &str, cancel: bool,
     crate::event_edit::delete_locally(conn, account_id, remote_id)
 }
 
-fn uuid_like() -> String {
+pub fn uuid_like() -> String {
     let mut b = [0u8; 12];
     getrandom::fill(&mut b).expect("OS RNG unavailable");
     b.iter().map(|x| format!("{x:02x}")).collect()

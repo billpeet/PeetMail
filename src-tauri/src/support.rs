@@ -176,6 +176,14 @@ pub fn database_summary(c: &rusqlite::Connection) -> Result<Value> {
     let mut stmt = c.prepare("SELECT key, value FROM settings ORDER BY key")?;
     for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
         let (k, v) = row?;
+        // One setting per entry (`signature:<address>`, `gmail_history:<account>`): the rest of
+        // the key can be personal, so these show as a count per prefix.
+        if let Some((prefix, _)) = k.split_once(':') {
+            let group = format!("{prefix}:*");
+            let n = settings.get(&group).and_then(Value::as_i64).unwrap_or(0);
+            settings.insert(group, json!(n + 1));
+            continue;
+        }
         let shown = if SAFE_SETTINGS.contains(&k.as_str()) { json!(v) } else { json!("[set]") };
         settings.insert(k, shown);
     }
@@ -392,9 +400,9 @@ mod tests {
                 let a = db::upsert_account(c, "microsoft", "priya@fabrikam.io", Some("Priya Nair"), b"t")?.id;
                 db::set_account_app(c, a, "custom")?;
                 db::set_setting(c, "cache_days", "90")?;
-                db::set_setting(c, "splits", r#"[{"name":"Boss","query":"from:boss@contoso.com"}]"#)?;
+                db::set_setting(c, "split:boss", r#"{"name":"Boss","query":"from:boss@contoso.com","order":2}"#)?;
                 db::set_setting(c, "google_client_secret", "GOCSPX-real-secret")?;
-                db::set_setting(c, "signatures", r#"[{"address":"priya@fabrikam.io","html":"<p>Priya Nair, +44 7700 900123</p>"}]"#)?;
+                db::set_setting(c, "signature:priya@fabrikam.io", r#"{"html":"<p>Priya Nair, +44 7700 900123</p>"}"#)?;
                 database_summary(c)
             })
             .unwrap();
@@ -402,7 +410,9 @@ mod tests {
         assert_eq!(v["integrity"], "ok");
         assert_eq!(v["accounts"], json!([{ "provider": "microsoft", "app": "custom", "signedIn": true }]));
         assert_eq!(v["settings"]["cache_days"], "90");
-        assert_eq!(v["settings"]["splits"], "[set]");
+        assert_eq!(v["settings"]["split:*"], 2, "the default Other split and Boss, counted");
+        assert_eq!(v["settings"]["signature:*"], 1);
+        assert_eq!(v["settings"]["google_client_secret"], "[set]");
         for secret in ["priya@fabrikam.io", "Priya Nair", "boss@contoso.com", "GOCSPX-real-secret", "7700 900123"] {
             assert!(!text.contains(secret), "{secret} leaked into the summary");
         }

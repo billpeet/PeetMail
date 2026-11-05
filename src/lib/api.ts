@@ -154,7 +154,8 @@ export type Signature = { address: string; html: string; replies: boolean; manag
 /** A send that hasn't gone out yet. */
 export type QueuedSend = { id: number; accountId: number; sendAt: string; draft: Draft };
 export type Contact = { name: string | null; address: string };
-export type Split = { name: string; query: string };
+/** `id`: stable through renames and reorders; absent on a split not saved yet. */
+export type Split = { id?: string; name: string; query: string };
 /** A tab of the split inbox. The first is the built-in Inbox (`builtin`): mail no split claims. */
 export type SplitInfo = Split & { builtin: boolean; count: number; unread: number };
 export type Attachment = { id: string; name: string; contentType: string; size: number };

@@ -4,7 +4,7 @@
   import { api, type Split } from "#lib/api.js";
   import { mail } from "#lib/mail.svelte.js";
 
-  let rows = $state<Split[]>(mail.splits.filter((s) => !s.builtin).map(({ name, query }) => ({ name, query })));
+  let rows = $state<Split[]>(mail.splits.filter((s) => !s.builtin).map(({ id, name, query }) => ({ id, name, query })));
   let saved = $state(false);
 
   async function save(e: SubmitEvent) {

@@ -37,7 +37,6 @@ pub const KEY_GOOGLE_CLIENT_SECRET: &str = "google_client_secret";
 pub const KEY_CACHE_DAYS: &str = "cache_days";
 pub const KEY_BODY_CACHE_MB: &str = "body_cache_mb";
 
-pub const KEY_SPLITS: &str = "splits";
 pub const KEY_HIDE_EMPTY_SPLITS: &str = "hide_empty_splits";
 pub const KEY_SHOW_RIGHT_PANE: &str = "show_right_pane";
 pub const KEY_RIGHT_PANE_WIDTH: &str = "right_pane_width";

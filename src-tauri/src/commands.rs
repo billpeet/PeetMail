@@ -10,7 +10,8 @@ use crate::{draft_files, drafts};
 use crate::db::{self, Account, Contact, Cursor, Folder, Mailbox, MessageRow, RecentOpen, Scope, ThreadRow};
 use crate::error::{AppError, Result};
 use crate::outbox::{self, Draft, DraftKind, Op, OutboxStatus};
-use crate::state::{AppState, CacheLimits, Preferences, KEY_BODY_CACHE_MB, KEY_CACHE_DAYS, KEY_CLIENT_ID, KEY_SPLITS};
+use crate::items;
+use crate::state::{AppState, CacheLimits, Preferences, KEY_BODY_CACHE_MB, KEY_CACHE_DAYS, KEY_CLIENT_ID};
 use crate::{auth, mail, query};
 
 #[derive(Serialize)]
@@ -840,16 +841,32 @@ pub fn suggest_contacts(state: State<'_, AppState>, prefix: String) -> Result<Ve
 
 // ---------- splits ----------
 
+/// Stored one per setting, `split:<id>` (see items.rs).
+const SPLIT_PREFIX: &str = "split:";
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Split {
+    /// Stays the same through renames and reorders. None for a split not saved yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub name: String,
     pub query: String,
+}
+
+/// A split as stored (the id is in the key).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, Deserialize)]
+struct StoredSplit {
+    name: String,
+    query: String,
 }
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SplitInfo {
+    /// None for the built-in Inbox tab.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub name: String,
     pub query: String,
     /// The built-in Inbox tab: everything no split claims. Always first, not editable.
@@ -858,35 +875,29 @@ pub struct SplitInfo {
     pub unread: i64,
 }
 
-fn default_splits() -> Vec<Split> {
-    vec![Split { name: "Other".into(), query: "is:other".into() }]
-}
-
-/// The user's splits (excluding the built-in Inbox tab).
+/// The user's splits (excluding the built-in Inbox tab), in tab order. A new install starts
+/// with Other (migration 0014).
 fn load_splits(state: &AppState) -> Result<Vec<Split>> {
-    let raw = state.db.with(|c| db::get_setting(c, KEY_SPLITS))?;
-    let Some(mut splits) = raw.and_then(|r| serde_json::from_str::<Vec<Split>>(&r).ok()) else {
-        return Ok(default_splits());
-    };
-    // Before the built-in Inbox existed, the default list started with Important (is:focused).
-    // Left in place it would claim nearly everything ahead of the user's own splits.
-    // One-time migration, so a user can still create such a split deliberately afterwards.
-    const MIGRATED: &str = "splits_builtin_inbox";
-    if state.db.with(|c| db::get_setting(c, MIGRATED))?.is_none() {
-        splits = drop_old_default(splits);
-        let json = serde_json::to_string(&splits)?;
-        state.db.with(|c| {
-            db::set_setting(c, KEY_SPLITS, &json)?;
-            db::set_setting(c, MIGRATED, "1")
-        })?;
-    }
-    Ok(splits)
+    let stored = state.db.with(|c| items::load_ordered::<StoredSplit>(c, SPLIT_PREFIX))?;
+    Ok(stored.into_iter().map(|(id, s)| Split { id: Some(id), name: s.name, query: s.query }).collect())
 }
 
-/// The pre-built-in-Inbox default list started with Important (`is:focused`), which would
-/// now claim nearly all mail ahead of the user's own splits.
-fn drop_old_default(splits: Vec<Split>) -> Vec<Split> {
-    splits.into_iter().filter(|s| !(s.name == "Important" && s.query == "is:focused")).collect()
+/// Trims and drops blank splits, and gives new ones (or ones with an unusable id) a fresh id.
+fn clean_splits(splits: Vec<Split>) -> Vec<(String, StoredSplit)> {
+    let mut out: Vec<(String, StoredSplit)> = Vec::new();
+    for s in splits {
+        let stored = StoredSplit { name: s.name.trim().into(), query: s.query.trim().into() };
+        if stored.name.is_empty() || stored.query.is_empty() {
+            continue;
+        }
+        let id = s
+            .id
+            .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+            .filter(|id| !out.iter().any(|(o, _)| o == id))
+            .unwrap_or_else(crate::calendar::uuid_like);
+        out.push((id, stored));
+    }
+    out
 }
 
 fn split_queries(state: &AppState) -> Result<Vec<String>> {
@@ -900,15 +911,15 @@ pub fn list_splits(state: State<'_, AppState>, folder_id: Option<i64>, hidden: O
     let hidden = hidden.unwrap_or_default();
     let splits = load_splits(&state)?;
     let queries: Vec<String> = splits.iter().map(|s| s.query.clone()).collect();
-    let tabs = std::iter::once(("Inbox".to_string(), String::new(), true))
-        .chain(splits.into_iter().map(|s| (s.name, s.query, false)));
+    let tabs = std::iter::once((None, "Inbox".to_string(), String::new(), true))
+        .chain(splits.into_iter().map(|s| (s.id, s.name, s.query, false)));
     state.db.with(|c| {
         tabs.enumerate()
-            .map(|(i, (name, query, builtin))| {
+            .map(|(i, (id, name, query, builtin))| {
                 let scope = folder_id.map(Scope::Folder).unwrap_or(Mailbox::Inbox.scope());
                 let filter = query::exclude_accounts(query::split_filter(&queries, i), &hidden);
                 let (count, unread) = db::count_threads(c, scope, &filter)?;
-                Ok(SplitInfo { name, query, builtin, count, unread })
+                Ok(SplitInfo { id, name, query, builtin, count, unread })
             })
             .collect()
     })
@@ -916,19 +927,15 @@ pub fn list_splits(state: State<'_, AppState>, folder_id: Option<i64>, hidden: O
 
 #[tauri::command]
 pub fn set_splits(state: State<'_, AppState>, splits: Vec<Split>) -> Result<()> {
-    // Anything saved from here on is post-migration.
-    state.db.with(|c| db::set_setting(c, "splits_builtin_inbox", "1"))?;
-    let splits: Vec<Split> = splits
-        .into_iter()
-        .map(|s| Split { name: s.name.trim().into(), query: s.query.trim().into() })
-        .filter(|s| !s.name.is_empty() && !s.query.is_empty())
-        .collect();
-    state.db.with(|c| db::set_setting(c, KEY_SPLITS, &serde_json::to_string(&splits)?))
+    let clean = clean_splits(splits);
+    state.db.with(|c| items::save_ordered(c, SPLIT_PREFIX, &clean))
 }
 
 // ---------- snippets ----------
 
-const KEY_SNIPPETS: &str = "snippets";
+/// Stored one per setting, `snippet:<name, ASCII-lowercased>`: names are unique that way, so
+/// the same snippet made on two devices is one entry.
+const SNIPPET_PREFIX: &str = "snippet:";
 
 /// Reusable text for the composer (`;name`). The body may use {first_name}, {name},
 /// {my_first_name} and {my_name}; the frontend fills them in.
@@ -965,20 +972,22 @@ fn clean_snippets(snippets: Vec<Snippet>) -> Result<Vec<Snippet>> {
 
 #[tauri::command]
 pub fn list_snippets(state: State<'_, AppState>) -> Result<Vec<Snippet>> {
-    let raw = state.db.with(|c| db::get_setting(c, KEY_SNIPPETS))?;
-    Ok(raw.and_then(|r| serde_json::from_str(&r).ok()).unwrap_or_default())
+    let stored = state.db.with(|c| items::load_ordered::<Snippet>(c, SNIPPET_PREFIX))?;
+    Ok(stored.into_iter().map(|(_, s)| s).collect())
 }
 
 #[tauri::command]
 pub fn set_snippets(state: State<'_, AppState>, snippets: Vec<Snippet>) -> Result<Vec<Snippet>> {
     let clean = clean_snippets(snippets)?;
-    state.db.with(|c| db::set_setting(c, KEY_SNIPPETS, &serde_json::to_string(&clean)?))?;
+    let entries: Vec<(String, Snippet)> = clean.iter().map(|s| (s.name.to_ascii_lowercase(), s.clone())).collect();
+    state.db.with(|c| items::save_ordered(c, SNIPPET_PREFIX, &entries))?;
     Ok(clean)
 }
 
 // ---------- signatures ----------
 
-const KEY_SIGNATURES: &str = "signatures";
+/// Stored one per setting, `signature:<lowercase address>`.
+const SIGNATURE_PREFIX: &str = "signature:";
 
 /// An account's signature. Keyed by address rather than account id, so it survives signing
 /// out and adding the account again (ids can be reused), and so send-as addresses can have
@@ -998,6 +1007,16 @@ pub struct Signature {
     pub managed: bool,
 }
 
+/// A signature as stored (the address is in the key).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, Deserialize)]
+struct StoredSignature {
+    html: String,
+    #[serde(default)]
+    replies: bool,
+    #[serde(default)]
+    managed: bool,
+}
+
 /// Lowercases addresses, sanitizes the HTML and drops empty signatures (unless the
 /// organisation adds one); the last entry for an address wins.
 fn clean_signatures(signatures: Vec<Signature>) -> Vec<Signature> {
@@ -1015,14 +1034,18 @@ fn clean_signatures(signatures: Vec<Signature>) -> Vec<Signature> {
 
 #[tauri::command]
 pub fn list_signatures(state: State<'_, AppState>) -> Result<Vec<Signature>> {
-    let raw = state.db.with(|c| db::get_setting(c, KEY_SIGNATURES))?;
-    Ok(raw.and_then(|r| serde_json::from_str(&r).ok()).unwrap_or_default())
+    let stored = state.db.with(|c| items::load::<StoredSignature>(c, SIGNATURE_PREFIX))?;
+    Ok(stored.into_iter().map(|(address, s)| Signature { address, html: s.html, replies: s.replies, managed: s.managed }).collect())
 }
 
 #[tauri::command]
 pub fn set_signatures(state: State<'_, AppState>, signatures: Vec<Signature>) -> Result<Vec<Signature>> {
     let clean = clean_signatures(signatures);
-    state.db.with(|c| db::set_setting(c, KEY_SIGNATURES, &serde_json::to_string(&clean)?))?;
+    let entries: Vec<(String, StoredSignature)> = clean
+        .iter()
+        .map(|s| (s.address.clone(), StoredSignature { html: s.html.clone(), replies: s.replies, managed: s.managed }))
+        .collect();
+    state.db.with(|c| items::replace(c, SIGNATURE_PREFIX, &entries))?;
     Ok(clean)
 }
 
@@ -1283,14 +1306,21 @@ mod tests {
     }
 
     #[test]
-    fn migration_drops_only_the_old_important_default() {
-        let split = |n: &str, q: &str| super::Split { name: n.into(), query: q.into() };
-        let kept = super::drop_old_default(vec![
-            split("Important", "is:focused"),
-            split("Other", "is:other"),
-            split("Important", "from:boss@contoso.com"),
+    fn splits_keep_their_ids_and_new_ones_get_one() {
+        let split = |id: Option<&str>, n: &str, q: &str| super::Split { id: id.map(String::from), name: n.into(), query: q.into() };
+        let clean = super::clean_splits(vec![
+            split(Some("other"), " Other ", "is:other"),
+            split(None, "Boss", "from:boss@contoso.com"),
+            split(Some("other"), "Copy", "is:unread"),
+            split(Some("bad key!"), "Odd", "is:flagged"),
+            split(None, "  ", "dropped"),
         ]);
-        assert_eq!(kept, vec![split("Other", "is:other"), split("Important", "from:boss@contoso.com")]);
+        let names: Vec<(&str, &str)> = clean.iter().map(|(id, s)| (id.as_str(), s.name.as_str())).collect();
+        assert_eq!(names[0], ("other", "Other"));
+        assert_eq!(names.len(), 4, "the blank split is dropped");
+        let ids: std::collections::HashSet<&str> = names.iter().map(|n| n.0).collect();
+        assert_eq!(ids.len(), 4, "a duplicate or unusable id gets a fresh one");
+        assert!(!ids.contains("bad key!"));
     }
 
     #[test]
