@@ -227,15 +227,12 @@ pub fn run() {
     let mut data_dir_override = testenv::get("PEETMAIL_DATA_DIR").map(std::path::PathBuf::from);
     let is_test = data_dir_override.is_some();
     let dev_data = dev_build && !is_test;
-    let mut dev_seeded = false;
-    if dev_data
-        && let Some(prod) = datadir::app_data_dir()
-    {
+    // Logging isn't up yet: how the copy went is reported in setup.
+    let mut dev_seed = Ok(false);
+    if dev_data {
         let dev = datadir::dev_dir();
-        match datadir::seed_dev(&prod, &dev) {
-            Ok(seeded) => dev_seeded = seeded,
-            // Logging isn't up yet.
-            Err(e) => eprintln!("couldn't copy the installed app's database for this dev build: {e}"),
+        if let Some(prod) = datadir::app_data_dir() {
+            dev_seed = datadir::seed_dev(&prod, &dev);
         }
         data_dir_override = Some(dev);
     }
@@ -312,15 +309,17 @@ pub fn run() {
                     log::warn!("couldn't make the data folder private: {e}");
                 }
             }
+            match &dev_seed {
+                Ok(true) => log::info!("dev build: copied the installed app's database to {}", dir.display()),
+                Ok(false) => {}
+                // Carrying on would start an empty mailbox that every later run keeps.
+                Err(e) => fatal_startup_error(&format!("This dev build couldn't copy the installed app's database to {}: {e}", dir.display())),
+            }
             secure::init(&dir, !is_test);
             let db = match db::Db::open(&dir.join("peetmail.db")) {
                 Ok(db) => db,
                 Err(e) => fatal_startup_error(&e.to_string()),
             };
-            if dev_seeded {
-                log::info!("dev build: copied the installed app's database to {}", dir.display());
-                db.with(|c| db::forget_pending_work(c))?;
-            }
             db.with(|c| outbox::reset_inflight(c))?;
             // A server search still open when the app closed: what it fetched goes again.
             db.with(|c| db::clear_search_cache(c))?;

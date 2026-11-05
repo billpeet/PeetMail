@@ -29,7 +29,10 @@ pub const DEV_DIR_NAME: &str = ".peetmail-dev";
 /// Gives a dev data folder a copy of the installed app's database, the first time only
 /// (delete the dev folder to take a fresh copy). The copy is a `VACUUM INTO` through a
 /// read-only connection, so it's consistent even with the installed app running and the
-/// original is never written. Returns whether a copy was made.
+/// database is never changed (SQLite may leave empty -wal/-shm files beside it). Work the
+/// installed app still owes the server is dropped from the copy before it's put in place,
+/// so a dev start that fails halfway can't leave it for a later run to send again.
+/// Returns whether a copy was made.
 pub fn seed_dev(prod: &Path, dev: &Path) -> std::io::Result<bool> {
     let (from, to) = (prod.join(DB_FILES[0]), dev.join(DB_FILES[0]));
     if to.exists() || !from.exists() {
@@ -38,17 +41,27 @@ pub fn seed_dev(prod: &Path, dev: &Path) -> std::io::Result<bool> {
     std::fs::create_dir_all(dev)?;
     let partial = dev.join(format!("{}.copying", DB_FILES[0]));
     let _ = std::fs::remove_file(&partial);
-    let conn = rusqlite::Connection::open_with_flags(&from, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(std::io::Error::other)?;
-    conn.execute("VACUUM INTO ?1", [partial.to_string_lossy()]).map_err(std::io::Error::other)?;
-    drop(conn);
-    std::fs::rename(&partial, &to)?;
-    for name in DEV_SEED_FILES {
-        let f = prod.join(name);
-        if f.exists() {
-            std::fs::copy(&f, dev.join(name))?;
+    let copied = copy_without_pending_work(&from, &partial).and_then(|()| {
+        for name in DEV_SEED_FILES {
+            let f = prod.join(name);
+            if f.exists() {
+                std::fs::copy(&f, dev.join(name))?;
+            }
         }
+        std::fs::rename(&partial, &to)
+    });
+    if copied.is_err() {
+        let _ = std::fs::remove_file(&partial);
     }
-    Ok(true)
+    copied.map(|()| true)
+}
+
+fn copy_without_pending_work(from: &Path, to: &Path) -> std::io::Result<()> {
+    let conn = rusqlite::Connection::open_with_flags(from, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(std::io::Error::other)?;
+    conn.execute("VACUUM INTO ?1", [to.to_string_lossy()]).map_err(std::io::Error::other)?;
+    drop(conn);
+    let copy = rusqlite::Connection::open(to).map_err(std::io::Error::other)?;
+    crate::db::forget_pending_work(&copy).map_err(|e| std::io::Error::other(e.to_string()))
 }
 
 /// The folder Tauri's `app_data_dir` resolves to, for code that runs before Tauri is up
@@ -164,7 +177,11 @@ mod tests {
         let db = prod.join("peetmail.db");
         {
             let c = rusqlite::Connection::open(&db).unwrap();
-            c.execute_batch("PRAGMA journal_mode = WAL; PRAGMA user_version = 7; CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('mail');").unwrap();
+            c.execute_batch(
+                "PRAGMA journal_mode = WAL; PRAGMA user_version = 7; CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('mail');
+                 CREATE TABLE outbox (id INTEGER PRIMARY KEY, op TEXT); INSERT INTO outbox (op) VALUES ('send');",
+            )
+            .unwrap();
         }
         fs::write(prod.join("token.key"), b"key").unwrap();
         let before = fs::read(&db).unwrap();
@@ -175,6 +192,8 @@ mod tests {
         let v: String = c.query_row("SELECT v FROM t", [], |r| r.get(0)).unwrap();
         let schema: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!((v.as_str(), schema), ("mail", 7));
+        let queued: i64 = c.query_row("SELECT COUNT(*) FROM outbox", [], |r| r.get(0)).unwrap();
+        assert_eq!(queued, 0, "the installed app's queued sends are dropped before the copy is in place");
         assert_eq!(fs::read(dev.join("token.key")).unwrap(), b"key");
         assert!(!dev.join("peetmail.db.copying").exists());
 

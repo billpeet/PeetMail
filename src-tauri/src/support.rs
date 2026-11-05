@@ -203,6 +203,7 @@ pub fn database_summary(c: &rusqlite::Connection) -> Result<Value> {
 fn log_dir(app: &AppHandle) -> PathBuf {
     match testenv::get("PEETMAIL_DATA_DIR") {
         Some(d) => PathBuf::from(d).join("logs"),
+        None if tauri::is_dev() => crate::datadir::dev_dir().join("logs"),
         None => app.path().app_log_dir().unwrap_or_default(),
     }
 }
