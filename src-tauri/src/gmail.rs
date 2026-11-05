@@ -3,13 +3,14 @@
 //! | Labels on the message            | Local folder role |
 //! |----------------------------------|-------------------|
 //! | TRASH                            | deleteditems      |
-//! | SPAM, or only DRAFT              | (not kept)        |
+//! | SPAM                             | junkemail         |
+//! | only DRAFT                       | (not kept)        |
 //! | PeetMail/Snoozed (our label)     | snoozed           |
 //! | INBOX                            | inbox             |
 //! | SENT                             | sentitems         |
 //! | anything else                    | archive           |
 //!
-//! Sync: the first run lists inbox, sent, archived and trashed mail inside the cache window;
+//! Sync: the first run lists inbox, sent, archived, trashed and spam mail inside the cache window;
 //! after that the History API returns what changed since the last historyId, and each
 //! changed message's metadata is fetched again (its labels say where it now lives). Threads
 //! are Gmail's own threadId. Triage ops become label changes (archive = remove INBOX).
@@ -312,7 +313,10 @@ pub fn role_for(labels: &[&str], snooze_label: Option<&str>) -> Option<&'static 
     if has("TRASH") {
         return Some("deleteditems");
     }
-    if has("SPAM") || (has("DRAFT") && !has("INBOX") && !has("SENT")) {
+    if has("SPAM") {
+        return Some(db::JUNK_ROLE);
+    }
+    if has("DRAFT") && !has("INBOX") && !has("SENT") {
         return None;
     }
     if snooze_label.is_some_and(has) {
@@ -332,6 +336,7 @@ fn folder_name(role: &str) -> &'static str {
         "inbox" => "Inbox",
         "sentitems" => "Sent",
         "deleteditems" => "Trash",
+        db::JUNK_ROLE => "Spam",
         "snoozed" => "Snoozed",
         _ => "All Mail",
     }
@@ -549,17 +554,22 @@ fn snooze_label_key(account_id: i64) -> String {
     format!("gmail_snooze_label:{account_id}")
 }
 
-/// Set once archived and trashed mail has been listed. Accounts that first synced before
-/// PeetMail kept those get them listed once (`backfill`), then history keeps them current.
-fn all_folders_key(account_id: i64) -> String {
-    format!("gmail_all_folders:{account_id}")
-}
-
-/// Archived, trashed and snoozed mail: everything with a folder that isn't inbox or sent
-/// (spam and drafts aren't kept).
+/// Archived, trashed and snoozed mail: everything with a folder that isn't inbox, sent or
+/// spam (drafts aren't kept).
 const ARCHIVE_AND_TRASH: &str = "includeSpamTrash=true&q=-in:inbox -in:sent -in:spam -in:drafts";
+/// Spam (the Junk view).
+const SPAM: &str = "includeSpamTrash=true&labelIds=SPAM";
 /// What a full sync lists, each inside the cache window. Inbox first, so it fills in first.
-const LISTINGS: &[&str] = &["labelIds=INBOX", "labelIds=SENT", ARCHIVE_AND_TRASH];
+const LISTINGS: &[&str] = &["labelIds=INBOX", "labelIds=SENT", ARCHIVE_AND_TRASH, SPAM];
+
+/// Listings added after PeetMail's first Gmail sync, each with the setting that records it
+/// was done. Accounts that first synced before one existed get it listed once (`backfill`),
+/// then history keeps it current.
+const BACKFILLS: &[(&str, &str)] = &[("gmail_all_folders", ARCHIVE_AND_TRASH), ("gmail_spam", SPAM)];
+
+fn backfill_key(name: &str, account_id: i64) -> String {
+    format!("{name}:{account_id}")
+}
 
 pub async fn sync_account(app: &AppHandle, state: &AppState, account_id: i64) -> Result<()> {
     let start = state.db.with(|c| db::get_setting(c, &history_key(account_id)))?;
@@ -572,8 +582,11 @@ pub async fn sync_account(app: &AppHandle, state: &AppState, account_id: i64) ->
         }
         other => other?,
     }
-    if state.db.with(|c| db::get_setting(c, &all_folders_key(account_id)))?.is_none() {
-        backfill(app, state, account_id).await?;
+    for (name, listing) in BACKFILLS {
+        let key = backfill_key(name, account_id);
+        if state.db.with(|c| db::get_setting(c, &key))?.is_none() {
+            backfill(app, state, account_id, listing, &key).await?;
+        }
     }
     Ok(())
 }
@@ -616,10 +629,10 @@ async fn fetch_and_store(app: &AppHandle, state: &AppState, account_id: i64, ids
     Ok(failed)
 }
 
-/// Lists archived and trashed mail once, for accounts synced before PeetMail kept them.
-async fn backfill(app: &AppHandle, state: &AppState, account_id: i64) -> Result<()> {
+/// Lists one kind of mail once (`BACKFILLS`), for accounts synced before PeetMail kept it.
+async fn backfill(app: &AppHandle, state: &AppState, account_id: i64, listing: &str, key: &str) -> Result<()> {
     let after = (Utc::now() - Duration::days(state.cache_limits()?.cache_days)).timestamp();
-    let ids = list_ids(state, account_id, ARCHIVE_AND_TRASH, after).await?;
+    let ids = list_ids(state, account_id, listing, after).await?;
     let known: HashSet<String> = state.db.with(|c| {
         let mut stmt = c.prepare("SELECT remote_id FROM messages WHERE account_id = ?1")?;
         let rows = stmt.query_map([account_id], |r| r.get(0))?;
@@ -630,7 +643,7 @@ async fn backfill(app: &AppHandle, state: &AppState, account_id: i64) -> Result<
     if failed > 0 {
         return Err(incomplete(failed));
     }
-    state.db.with(|c| db::set_setting(c, &all_folders_key(account_id), "1"))?;
+    state.db.with(|c| db::set_setting(c, key, "1"))?;
     prune(app, state, account_id)
 }
 
@@ -762,7 +775,7 @@ fn keep_search_results(state: &AppState, account_id: i64, fetched: &[(String, Re
         let tx = c.transaction()?;
         let mut kept = 0;
         for (role, m) in &parsed {
-            let Some(role) = role.filter(|r| *r != "deleteditems") else { continue };
+            let Some(role) = role.filter(|r| !matches!(*r, "deleteditems" | db::JUNK_ROLE)) else { continue };
             let folder = db::ensure_local_folder(&tx, account_id, role, folder_name(role))?;
             db::keep_search_result(&tx, account_id, folder.id, m, hit)?;
             kept += 1;
@@ -799,7 +812,7 @@ async fn full(app: &AppHandle, state: &AppState, account_id: i64) -> Result<()> 
         let busy = outbox::busy_remote_ids(c, account_id)?;
         let mut stmt = c.prepare(
             "SELECT m.remote_id FROM messages m JOIN folders f ON f.id = m.folder_id
-             WHERE m.account_id = ?1 AND f.role IN ('inbox', 'sentitems', 'archive', 'deleteditems')
+             WHERE m.account_id = ?1 AND f.role IN ('inbox', 'sentitems', 'archive', 'deleteditems', 'junkemail')
                AND m.id NOT IN (SELECT message_id FROM search_cache)",
         )?;
         let local: Vec<String> = stmt.query_map([account_id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
@@ -807,7 +820,10 @@ async fn full(app: &AppHandle, state: &AppState, account_id: i64) -> Result<()> 
             c.execute("DELETE FROM messages WHERE account_id = ?1 AND remote_id = ?2", rusqlite::params![account_id, id])?;
         }
         db::set_setting(c, &history_key(account_id), &history)?;
-        db::set_setting(c, &all_folders_key(account_id), "1")
+        for (name, _) in BACKFILLS {
+            db::set_setting(c, &backfill_key(name, account_id), "1")?;
+        }
+        Ok(())
     })?;
     prune(app, state, account_id)?;
     Ok(())
@@ -933,6 +949,18 @@ async fn modify(state: &AppState, account_id: i64, id: &str, add: &[&str], remov
     call(state, account_id, Method::POST, &format!("{}/messages/{id}/modify", base()), Some(&body)).await
 }
 
+/// Sets labels on a message (moving it to Archive or Spam), first taking it out of Trash if
+/// it's there: undoing a delete. Only untrash leaves Trash, and it can put the message back
+/// in the inbox, so the labels are set again after.
+async fn out_of_trash(state: &AppState, account_id: i64, id: &str, add: &[&str], remove: &[&str]) -> Result<Value> {
+    let m = modify(state, account_id, id, add, remove).await?;
+    if !m["labelIds"].as_array().is_some_and(|l| l.iter().any(|l| l == "TRASH")) {
+        return Ok(m);
+    }
+    call(state, account_id, Method::POST, &format!("{}/messages/{id}/untrash", base()), None).await?;
+    modify(state, account_id, id, add, remove).await
+}
+
 /// One outbox op against Gmail.
 pub async fn execute(state: &AppState, account_id: i64, remote_id: Option<&str>, op: &Op) -> Result<Value> {
     let rid = || remote_id.ok_or_else(|| AppError::Other("op has no target message".into()));
@@ -946,27 +974,26 @@ pub async fn execute(state: &AppState, account_id: i64, remote_id: Option<&str>,
         Op::Move { destination } => {
             let id = rid()?;
             match destination.as_str() {
-                "archive" => {
-                    let m = modify(state, account_id, id, &[], &["INBOX"]).await?;
-                    if !m["labelIds"].as_array().is_some_and(|l| l.iter().any(|l| l == "TRASH")) {
-                        return Ok(m);
-                    }
-                    // Undoing a delete of archived mail: only untrash leaves Trash, and it can
-                    // put the message back in the inbox, so take that off again.
-                    call(state, account_id, Method::POST, &format!("{}/messages/{id}/untrash", base()), None).await?;
-                    modify(state, account_id, id, &[], &["INBOX"]).await
+                // SPAM comes off on the way to Archive (undoing "spam" on archived mail).
+                "archive" => out_of_trash(state, account_id, id, &[], &["INBOX", "SPAM"]).await,
+                // Gmail's "Report spam" is the SPAM label.
+                db::JUNK_ROLE => {
+                    let snoozed = state.db.with(|c| db::get_setting(c, &snooze_label_key(account_id)))?;
+                    let remove: Vec<&str> = ["INBOX"].into_iter().chain(snoozed.as_deref()).collect();
+                    out_of_trash(state, account_id, id, &["SPAM"], &remove).await
                 }
                 "deleteditems" => call(state, account_id, Method::POST, &format!("{}/messages/{id}/trash", base()), None).await,
                 "inbox" => {
                     // Back from Trash (undo delete) or from a snooze or archive.
                     let _ = call(state, account_id, Method::POST, &format!("{}/messages/{id}/untrash", base()), None).await;
                     let snoozed = state.db.with(|c| db::get_setting(c, &snooze_label_key(account_id)))?;
-                    let remove: Vec<&str> = snoozed.as_deref().into_iter().collect();
+                    // SPAM off too: "not spam".
+                    let remove: Vec<&str> = ["SPAM"].into_iter().chain(snoozed.as_deref()).collect();
                     modify(state, account_id, id, &["INBOX"], &remove).await
                 }
                 d if d == crate::actions::SNOOZE_DEST => {
                     let label = snooze_label(state, account_id).await?;
-                    modify(state, account_id, id, &[&label], &["INBOX"]).await
+                    modify(state, account_id, id, &[&label], &["INBOX", "SPAM"]).await
                 }
                 other => Err(AppError::Graph { status: 400, message: format!("can't move Gmail mail to {other}") }),
             }
@@ -1033,7 +1060,9 @@ mod tests {
         assert_eq!(role_for(&["INBOX", "SENT"], None), Some("inbox"));
         assert_eq!(role_for(&["CATEGORY_PERSONAL"], None), Some("archive"));
         assert_eq!(role_for(&["TRASH", "INBOX"], None), Some("deleteditems"));
-        assert_eq!(role_for(&["SPAM"], None), None);
+        assert_eq!(role_for(&["SPAM", "INBOX"], None), Some("junkemail"));
+        assert_eq!(role_for(&["SPAM", "Label_7"], Some("Label_7")), Some("junkemail"));
+        assert_eq!(role_for(&["SPAM", "TRASH"], None), Some("deleteditems"));
         assert_eq!(role_for(&["DRAFT"], None), None);
         assert_eq!(role_for(&["Label_7"], Some("Label_7")), Some("snoozed"));
     }

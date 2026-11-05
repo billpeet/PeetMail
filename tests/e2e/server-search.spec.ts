@@ -101,6 +101,16 @@ test("a new server search replaces the last one's results", async ({ inbox: page
   await expect(row(page, "conv-pension")).toHaveCount(0);
 });
 
+test("the server's junk isn't a result, like its trash", async ({ inbox: page, fake }) => {
+  await deliverOldThread(fake);
+  await fake.control("deliver", { subject: "Pension unlock offer", preview: "Cash out your pension today!", receivedAt: daysAgo(200), folder: "junkemail", conversationId: "conv-pension-scam" });
+  await search(page, "pension");
+  await page.keyboard.press("Control+Enter");
+  await expect(page.getByTestId("server-search-found")).toHaveText("1 message found on the server");
+  await expect(row(page, "conv-pension")).toBeVisible();
+  await expect(row(page, "conv-pension-scam")).toHaveCount(0);
+});
+
 test("closing the search while the server is still answering leaves nothing behind", async ({ inbox: page, fake }) => {
   await deliverOldThread(fake);
   await search(page, "pension");

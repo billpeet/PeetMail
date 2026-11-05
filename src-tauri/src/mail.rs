@@ -156,11 +156,17 @@ pub async fn prefetch_bodies(app: AppHandle) {
 }
 
 /// Folders kept in sync, inside the mail window. Sent is synced so threads show your
-/// replies; Archive and Deleted Items back the Done and Trash views.
-const SYNCED_FOLDERS: &[(&str, &str)] = &[("inbox", "Inbox"), ("sentitems", "Sent Items"), ("archive", "Archive"), ("deleteditems", "Deleted Items")];
+/// replies; Archive, Deleted Items and Junk Email back the Done, Trash and Junk views.
+const SYNCED_FOLDERS: &[(&str, &str)] = &[
+    ("inbox", "Inbox"),
+    ("sentitems", "Sent Items"),
+    ("archive", "Archive"),
+    ("deleteditems", "Deleted Items"),
+    ("junkemail", "Junk Email"),
+];
 
 /// Folders a mailbox may not have (some Exchange mailboxes have no Archive): a 404 skips them.
-const OPTIONAL_FOLDERS: &[&str] = &["archive"];
+const OPTIONAL_FOLDERS: &[&str] = &["archive", "junkemail"];
 
 async fn sync_account(app: &AppHandle, state: &AppState, account: &Account) -> Result<()> {
     sync_mail_and_calendar(app, state, account).await?;
@@ -406,8 +412,8 @@ pub async fn fetch_conversation(state: &AppState, account_id: i64, conversation_
     keep_search_results(state, account_id, &page, false, generation)
 }
 
-/// Stores search results in the folders they're in: mail in Deleted Items is left out (like
-/// local search) and so are drafts; mail in folders PeetMail doesn't sync counts as archived.
+/// Stores search results in the folders they're in: mail in Deleted Items and Junk is left
+/// out (like local search) and so are drafts; mail in folders PeetMail doesn't sync counts as archived.
 fn keep_search_results(state: &AppState, account_id: i64, page: &Value, hit: bool, generation: u64) -> Result<usize> {
     let items = page["value"].as_array().cloned().unwrap_or_default();
     state.db.with(|c| {
@@ -425,7 +431,7 @@ fn keep_search_results(state: &AppState, account_id: i64, page: &Value, hit: boo
             let parent = v["parentFolderId"].as_str();
             let folder = folders.iter().find(|f| parent == Some(f.remote_id.as_str()));
             let folder_id = match folder {
-                Some(f) if f.role.as_deref() == Some("deleteditems") => continue,
+                Some(f) if matches!(f.role.as_deref(), Some("deleteditems" | db::JUNK_ROLE)) => continue,
                 Some(f) if f.role.is_some() => f.id,
                 _ => db::ensure_local_folder(&tx, account_id, "archive", "Archive")?.id,
             };

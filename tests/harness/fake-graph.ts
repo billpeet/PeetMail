@@ -40,6 +40,7 @@ const FOLDER_NAMES: Record<FolderName, string> = {
   sentitems: "Sent Items",
   archive: "Archive",
   deleteditems: "Deleted Items",
+  junkemail: "Junk Email",
 };
 
 const b64url = (buf: Uint8Array) => Buffer.from(buf).toString("base64url");
@@ -976,7 +977,7 @@ export async function startFakeGraph({ port = 0, mailbox, count, seed, verbose =
             "POST /_test/remove {id}",
             "POST /_test/draft {subject?, html?, to?: [address], bcc?, attachments?: [{name, text}]}   POST /_test/draft-update {id, subject?, html?}   POST /_test/draft-remove {id}",
             "POST /_test/throttle {count?=1, status?=429, retryAfter?=1}",
-            "POST /_test/move {id, folder: inbox|archive|deleteditems|sentitems}",
+            "POST /_test/move {id, folder: inbox|archive|deleteditems|junkemail|sentitems}",
             "POST /_test/config {rejectDeltaFilter?, expireDelta?, tokenTtl?, latencyMs?, failBody?, failWrites?: status, dropWrites?: count}",
             "GET  /_test/sent   (writes the app made: send, reply, move, patch, rsvp, event)",
             "POST /_test/event {id, subject?, start?, end? (ISO), allDay?, location?, response?, attendees?: [[name, address]]}   POST /_test/event-remove {id}   GET /_test/event?id=",

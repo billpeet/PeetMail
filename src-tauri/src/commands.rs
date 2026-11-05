@@ -311,8 +311,8 @@ pub fn clear_server_search(app: AppHandle, state: State<'_, AppState>) -> Result
 }
 
 #[tauri::command]
-pub fn get_thread(state: State<'_, AppState>, account_id: i64, conversation_id: String, with_trash: Option<bool>) -> Result<Vec<MessageRow>> {
-    state.db.with(|c| db::get_thread(c, account_id, &conversation_id, with_trash.unwrap_or(false)))
+pub fn get_thread(state: State<'_, AppState>, account_id: i64, conversation_id: String, from: Option<Mailbox>) -> Result<Vec<MessageRow>> {
+    state.db.with(|c| db::get_thread(c, account_id, &conversation_id, from))
 }
 
 #[tauri::command]
