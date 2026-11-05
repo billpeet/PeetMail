@@ -26,6 +26,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0014_settings_items.sql"),
     include_str!("../migrations/0015_outbox_ids.sql"),
     include_str!("../migrations/0016_search_cache.sql"),
+    include_str!("../migrations/0017_settings_sync.sql"),
+    include_str!("../migrations/0018_account_items.sql"),
 ];
 
 pub struct Db {
@@ -158,8 +160,31 @@ pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
         .optional()?)
 }
 
+/// Saves a setting. A real change to a synced one is recorded for settings sync (sync/store.rs);
+/// writing the value it already has changes nothing.
 pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
-    debug_assert!(crate::sync::scope(key).is_some(), "setting {key:?} isn't classified as synced or local in sync.rs");
+    let scope = crate::sync::scope(key);
+    debug_assert!(scope.is_some(), "setting {key:?} isn't classified as synced or local in sync/mod.rs");
+    if get_setting(conn, key)?.as_deref() == Some(value) {
+        return Ok(());
+    }
+    write_setting_unsynced(conn, key, value)?;
+    if scope == Some(crate::sync::Scope::Synced) {
+        crate::sync::store::touch(conn, key, false)?;
+    }
+    Ok(())
+}
+
+pub fn delete_setting(conn: &Connection, key: &str) -> Result<()> {
+    let removed = conn.execute("DELETE FROM settings WHERE key = ?1", [key])? > 0;
+    if removed && crate::sync::scope(key) == Some(crate::sync::Scope::Synced) {
+        crate::sync::store::touch(conn, key, true)?;
+    }
+    Ok(())
+}
+
+/// Writes a setting without recording it for sync: for values that came from the server.
+pub fn write_setting_unsynced(conn: &Connection, key: &str, value: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
          ON CONFLICT (key) DO UPDATE SET value = excluded.value",
@@ -168,7 +193,7 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn delete_setting(conn: &Connection, key: &str) -> Result<()> {
+pub fn delete_setting_unsynced(conn: &Connection, key: &str) -> Result<()> {
     conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
     Ok(())
 }
@@ -1211,6 +1236,26 @@ mod tests {
         assert!(settings_with_prefix(&c, "snippet:").unwrap().is_empty());
         assert!(settings_with_prefix(&c, "signature:").unwrap().is_empty());
         assert_eq!(get_setting(&c, "layout").unwrap().as_deref(), Some("list"), "other settings are untouched");
+    }
+
+    #[test]
+    fn accounts_already_here_join_the_synced_list_queued_to_go_up() {
+        let mut c = Connection::open_in_memory().unwrap();
+        migrate_to(&mut c, 17).unwrap();
+        c.execute("INSERT INTO accounts (provider, email, display_name, oauth_app) VALUES ('microsoft', 'Boris@Work.example', 'Boris', 'custom')", []).unwrap();
+        c.execute("INSERT INTO accounts (provider, email) VALUES ('google', 'sam@gmail.com')", []).unwrap();
+        migrate(&mut c).unwrap();
+        let items: Vec<(String, serde_json::Value)> = json_settings(&c, "account:");
+        assert_eq!(
+            items,
+            [
+                ("google:sam@gmail.com".to_string(), serde_json::json!({ "app": "builtin", "name": null })),
+                ("microsoft:boris@work.example".to_string(), serde_json::json!({ "app": "custom", "name": "Boris" })),
+            ]
+        );
+        let dirty = crate::sync::store::dirty(&c, 100).unwrap();
+        assert_eq!(dirty.len(), 2);
+        assert!(dirty.iter().all(|d| d.hlc == crate::sync::hlc::ZERO && d.server_seq.is_none()));
     }
 
     #[test]

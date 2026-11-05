@@ -245,9 +245,15 @@ pub async fn sign_in(
 
 /// New tokens for the same scopes the account signed in with.
 pub async fn refresh(http: &reqwest::Client, cfg: &OAuthConfig, current: &TokenSet) -> Result<TokenSet> {
+    Ok(refresh_with_id_token(http, cfg, current).await?.0)
+}
+
+/// A refresh that also gives back the provider's id_token, when it sends one (both do with
+/// `openid` in the scopes). Settings sync uses it as proof of who the account is.
+pub async fn refresh_with_id_token(http: &reqwest::Client, cfg: &OAuthConfig, current: &TokenSet) -> Result<(TokenSet, Option<String>)> {
     let scopes = current.scopes.clone().unwrap_or_else(|| cfg.scopes.clone());
     let mut form = vec![("client_id", cfg.client_id.as_str()), ("grant_type", "refresh_token"), ("refresh_token", current.refresh_token.as_str())];
-    Ok(token_request(http, cfg, &scopes, &mut form, Some(&current.refresh_token)).await?.0)
+    token_request(http, cfg, &scopes, &mut form, Some(&current.refresh_token)).await
 }
 
 async fn token_request<'a>(

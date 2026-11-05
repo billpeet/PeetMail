@@ -12,6 +12,9 @@ Unreleased into that version's section when cutting a stable release.
 
 ## Unreleased
 
+- Your settings can follow you between PCs: splits, snippets, signatures and preferences sync through a server you or your organisation runs, encrypted on your PC first so the server can't read them. Turn it on under **Settings → Sync**; see Help (**F1**) → Syncing settings.
+- With settings sync on, an account you add on one PC is offered on your others (**Settings → Accounts → On your other PCs**), and signing an account out asks whether it's for this PC only or everywhere.
+
 ## 0.2.1 — 2026-11-05
 
 - Act on several conversations at once: **x** selects one, **Shift+J** / **Shift+K** select as you move, and **Ctrl+A** selects everything in the view. **e**, **#**, **u**, **s** and **h** then archive, delete, mark read, flag or snooze them all, and one **z** undoes the lot. **Esc** clears the selection. With the mouse, Ctrl+click and Shift+click.

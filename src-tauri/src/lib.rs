@@ -251,6 +251,10 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
         .on_window_event(|window, event| {
+            // Coming back to PeetMail is a good moment to pick up settings changed elsewhere.
+            if let tauri::WindowEvent::Focused(true) = event {
+                sync::store::WAKE.notify_one();
+            }
             // Closing the window hides it to the tray (unless that's turned off).
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.app_handle().state::<state::AppState>();
@@ -355,6 +359,8 @@ pub fn run() {
                 }
             });
 
+            sync::engine::start(app.handle(), sync_interval);
+
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
@@ -382,6 +388,22 @@ pub fn run() {
             commands::clear_server_search,
             commands::get_message_body,
             commands::sync_now,
+            sync::commands::settings_sync_status,
+            sync::commands::synced_accounts,
+            sync::commands::dismiss_synced_account,
+            sync::commands::settings_sync_connect,
+            sync::commands::settings_sync_join,
+            sync::commands::settings_sync_create,
+            sync::commands::settings_sync_cancel,
+            sync::commands::settings_sync_now,
+            sync::commands::settings_sync_devices,
+            sync::commands::settings_sync_revoke,
+            sync::commands::settings_sync_identities,
+            sync::commands::settings_sync_unlink,
+            sync::commands::settings_sync_change_passphrase,
+            sync::commands::settings_sync_recovery_key,
+            sync::commands::settings_sync_disable,
+            sync::commands::settings_sync_delete_account,
             commands::set_cache_limits,
             commands::set_preferences,
             commands::record_open,

@@ -8,7 +8,7 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createSign, generateKeyPairSync, randomBytes } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import {
   ACCOUNT,
@@ -44,6 +44,31 @@ const FOLDER_NAMES: Record<FolderName, string> = {
 };
 
 const b64url = (buf: Uint8Array) => Buffer.from(buf).toString("base64url");
+
+// ---------- OpenID id_tokens ----------
+// Signed like Entra's (RS256, a published key set), so the real sync server can check them.
+// One key for the whole process: the two-mailbox proxy's fakes share it, and the issuer is a
+// fixed template rather than a fake's own address, so tokens from either verify the same way.
+
+/** Entra's multi-tenant issuer form; `{tenantid}` is the token's own `tid`. */
+export const ID_ISSUER_TEMPLATE = "https://login.fake.test/{tenantid}/v2.0";
+export const TEST_TENANT = "f0f0f0f0-0000-4000-8000-000000000001";
+const ID_KEY = generateKeyPairSync("rsa", { modulusLength: 2048 });
+const ID_KID = "fake-graph-key";
+export const ID_JWKS = { keys: [{ ...ID_KEY.publicKey.export({ format: "jwk" }), kid: ID_KID, alg: "RS256", use: "sig" }] };
+
+/** The object id a fake gives an account: stable for its address, like a real directory. */
+export function objectId(mail: string) {
+  const h = createHash("sha256").update(mail.toLowerCase()).digest("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+}
+
+export function signIdToken(claims: Record<string, unknown>) {
+  const header = b64url(Buffer.from(JSON.stringify({ alg: "RS256", kid: ID_KID, typ: "JWT" })));
+  const payload = b64url(Buffer.from(JSON.stringify(claims)));
+  const sig = createSign("RSA-SHA256").update(`${header}.${payload}`).sign(ID_KEY.privateKey);
+  return `${header}.${payload}.${b64url(sig)}`;
+}
 
 type Json = Record<string, any>;
 /** A message being put together (POST /me/messages, createReply...), not yet sent. */
@@ -208,6 +233,11 @@ export async function startFakeGraph({ port = 0, mailbox, count, seed, verbose =
   // ---------- identity platform ----------
 
   async function oauth(req: IncomingMessage, url: URL, reply: Reply) {
+    // OpenID discovery, as the sync server reads it (its MICROSOFT_DISCOVERY_URL points here).
+    if (url.pathname === "/oauth/v2.0/.well-known/openid-configuration") {
+      return reply(200, { issuer: ID_ISSUER_TEMPLATE, jwks_uri: `http://${req.headers.host}/oauth/discovery/keys` });
+    }
+    if (url.pathname === "/oauth/discovery/keys") return reply(200, ID_JWKS);
     if (url.pathname === "/oauth/authorize") {
       const q = url.searchParams;
       if (q.get("client_id") !== CLIENT_ID) {
@@ -271,7 +301,20 @@ export async function startFakeGraph({ port = 0, mailbox, count, seed, verbose =
     state.refreshTokens.add(refresh);
     state.tokenScopes.set(access, scopes);
     state.tokenScopes.set(refresh, scopes);
-    return { token_type: "Bearer", access_token: access, refresh_token: refresh, expires_in: state.config.tokenTtl, scope: "Mail.ReadWrite" };
+    const now = Math.floor(Date.now() / 1000);
+    const oid = objectId(account.mail);
+    const id_token = signIdToken({
+      iss: ID_ISSUER_TEMPLATE.replace("{tenantid}", TEST_TENANT),
+      aud: CLIENT_ID,
+      sub: `pairwise-${oid}`,
+      tid: TEST_TENANT,
+      oid,
+      preferred_username: account.mail,
+      name: account.displayName,
+      iat: now,
+      exp: now + 3600,
+    });
+    return { token_type: "Bearer", access_token: access, refresh_token: refresh, id_token, expires_in: state.config.tokenTtl, scope: "Mail.ReadWrite" };
   }
 
   // ---------- graph ----------

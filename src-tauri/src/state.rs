@@ -68,6 +68,10 @@ pub struct AppState {
     pub undo: std::sync::Mutex<Vec<crate::actions::UndoGroup>>,
     /// Held while bodies are prefetched in the background, so runs don't pile up.
     pub prefetch_lock: tokio::sync::Mutex<()>,
+    /// Settings sync's state in memory: a sign-in waiting for its passphrase, the last run.
+    pub settings_sync: std::sync::Mutex<crate::sync::engine::Memory>,
+    /// Serializes settings sync runs (timer, "sync now", turning it on).
+    pub settings_sync_lock: tokio::sync::Mutex<()>,
     /// Held while drafts are pushed to or pulled from a server, so a pull never sees a
     /// server draft whose id a push hasn't stored yet (and takes it for a new one).
     pub drafts_lock: tokio::sync::Mutex<()>,
@@ -127,6 +131,8 @@ impl AppState {
             prefetch_lock: Default::default(),
             drafts_lock: Default::default(),
             transient_drafts: Default::default(),
+            settings_sync: Default::default(),
+            settings_sync_lock: Default::default(),
         }
     }
 
@@ -273,6 +279,29 @@ impl AppState {
             Some(s) => s,
             None => self.oauth_for_account(account_id)?.scopes().to_string(),
         })
+    }
+
+    /// A just-issued OpenID id_token for an account, and its provider: settings sync's proof
+    /// of who the account is (the server accepts only fresh ones). Always refreshes.
+    pub async fn fresh_id_token(&self, account_id: i64) -> Result<(String, String)> {
+        let mut cache = self.tokens.lock().await;
+        let current: TokenSet = match cache.get(&account_id) {
+            Some(t) => t.clone(),
+            None => {
+                let blob = self
+                    .db
+                    .with(|c| db::get_token_blob(c, account_id))?
+                    .ok_or_else(|| AppError::Auth("account has no stored credentials".into()))?;
+                serde_json::from_slice(&secure::unprotect(&blob)?)?
+            }
+        };
+        let provider = self.db.with(|c| db::account_provider(c, account_id))?;
+        let (fresh, id_token) = auth::refresh_with_id_token(&self.http, &self.oauth_for_account(account_id)?, &current).await?;
+        let blob = Self::store_tokens_blob(&fresh)?;
+        self.db.with(|c| db::set_token_blob(c, account_id, &blob))?;
+        cache.insert(account_id, fresh);
+        let id_token = id_token.ok_or_else(|| AppError::Other("the account's sign-in didn't say who it is; reconnect it under Settings → Accounts".into()))?;
+        Ok((if provider == "google" { "google".into() } else { "microsoft".into() }, id_token))
     }
 
     /// Returns a valid access token, refreshing and persisting a new token set if needed.

@@ -8,8 +8,8 @@ Settings, signatures, snippets, splits, the list of accounts and (later) shared 
 |---|---|
 | 1 Item-shaped settings | Done |
 | 2 Sync server | Done (image built in CI, not yet published) |
-| 3 Client sync and Settings → Sync | Not started |
-| 4 Synced account list | Not started |
+| 3 Client sync and Settings → Sync | Done (Microsoft accounts tested end to end; Google untested, see Risks) |
+| 4 Synced account list | Done |
 | 5 Shared mailboxes and send-as | Not started (feature itself is new, see PLAN.md Tier 3) |
 
 ## Decisions
@@ -30,12 +30,14 @@ Settings, signatures, snippets, splits, the list of accounts and (later) shared 
 | Syncs | Stays on the device |
 |---|---|
 | Splits, hide empty splits, signatures, snippets, undo-send delay, week start, notifications | Pane and list widths, layout (depends on the screen), close to tray |
-| The list of accounts: provider, address, which OAuth app (stage 4) | Tokens, cache window, body cache size |
-| The user's own Microsoft client ID and Google client ID/secret (safe because encrypted) | Update channel, install ID, changelog seen, privacy notice seen, restart-to-update |
+| The list of accounts: provider, address, which OAuth app, display name (stage 4) | Tokens, cache window, body cache size |
+| | Update channel, install ID, changelog seen, privacy notice seen, restart-to-update |
 | Later: shared mailboxes and send-as per account, "my organisation adds my signature", editable shortcuts | Crash reports and usage data consent (a new machine asks for itself) |
 | | Sync cursors and per-account bookkeeping (`history_key`, `all_folders_key`, snooze label keys) |
+| | The user's own Microsoft client ID and Google client ID/secret, for now: changing them signs out the accounts that use them, so a change arriving from another device would sign accounts out unannounced. They can sync once that's handled (they'd be safe to send, encrypted). |
+| | Settings sync's own state: the server, the sealed device token and key, the cursor, the clock's node id, which accounts are linked |
 
-`sync.rs` lists every settings key (or key prefix) as synced or local. A key in neither list is a mistake: `db::set_setting` asserts against it in debug builds (so any test that writes it fails), and a unit test scans the source for `KEY_*` constants, literal keys passed to the settings functions and `format!` key builders. Each new setting gets a deliberate choice.
+`sync/mod.rs` lists every settings key (or key prefix) as synced or local. A key in neither list is a mistake: `db::set_setting` asserts against it in debug builds (so any test that writes it fails), and a unit test scans the source for `KEY_*` constants, literal keys passed to the settings functions and `format!` key builders. Each new setting gets a deliberate choice.
 
 ## Data model
 
@@ -56,19 +58,25 @@ Diagnostics (`support.rs`) show settings keys containing `:` as a count per pref
 
 ### On the client
 
-A migration (the next free number in `src-tauri/migrations`) adds:
+Migration `0017_settings_sync.sql` adds:
 
 ```sql
 CREATE TABLE sync_items (
-  key        TEXT PRIMARY KEY,   -- the settings key, e.g. 'snippet:7f3a'
+  key        TEXT PRIMARY KEY,   -- the settings key, e.g. 'snippet:thanks'
   hlc        TEXT NOT NULL,      -- hybrid logical clock of the local value
-  server_seq INTEGER,            -- version the server last confirmed; NULL = never pushed
+  server_seq INTEGER,            -- version the server last confirmed; NULL = never in step
   dirty      INTEGER NOT NULL DEFAULT 0,
   deleted    INTEGER NOT NULL DEFAULT 0
 );
 ```
 
-`set_setting` (and a new `delete_setting`) bump the clock and mark the row dirty when the key is synced. Applying a pulled item writes the setting without marking it dirty, then emits `settings-changed {keys}` so the UI stores reload.
+- **Tracking local changes** (`sync/store.rs`). `db::set_setting` and `db::delete_setting` stamp a synced key and mark it dirty, whether or not sync is on, so turning it on later knows what was really edited. Writing a value a setting already has changes nothing: `set_preferences` rewrites every preference on each change, and stamping unchanged ones would let a stale value beat a real edit made elsewhere. Each change also wakes the sync loop.
+- **The clock** (`sync/hlc.rs`): `<ms, 13 digits>:<counter, 4 digits>:<node>`, compared as strings. The next stamp passes both the PC's time and the newest stamp seen, so an edit made after syncing wins even on a PC whose clock is behind. Stamps more than a day ahead are refused, so one PC with a wrong clock can't freeze a setting. Never-edited settings (defaults) carry the zero stamp and lose to anything.
+- **Applying another device's change** writes the setting without stamping it (`db::write_setting_unsynced`), records the remote stamp and version, then emits `settings-changed {keys}`. The UI reloads preferences, snippets, signatures and splits (`mail.reloadSettings`). Only keys classified as synced are ever applied: the server can't change this device's cache size or sync state.
+- **A run** (`sync/engine.rs`): pull every page since the cursor and merge; push dirty items in batches of 200, each with the version it was made on; merge each conflict and push again (three rounds at most, the rest waits for the next run); then link any of this PC's accounts that aren't linked. Runs a few seconds after startup, every sync interval (60 s), two seconds after a local change, and on window focus. "Sync now" runs it at once.
+- **Item plaintext**: `{v: 1, key, value, hlc}`, `value` null for a removal. A device skips (and logs) an item it can't decrypt, one whose key doesn't match its id, one from a newer `v`, or one with an implausible stamp; one bad item doesn't stop the rest.
+- **The device's secret** (its device id, token and the master key) is sealed with `secure.rs` (DPAPI on Windows, the keyring key on Linux), like sign-in tokens, in the local setting `settings_sync_secret`.
+- **A device the server signed out** (`401 device_revoked`/`unauthorized`) turns sync off by itself and says why in Settings → Sync.
 
 ### On the server
 
@@ -171,19 +179,53 @@ Split `splits`, `snippets` and `signatures` into per-item keys with a migration;
 
 ### Stage 3: client sync and Settings → Sync
 
-The engine, crypto, Settings → Sync (server URL, turn on, passphrase and recovery key, linked accounts, devices, passphrase change, turn off, delete sync account), footer status on failure, keymap entries for opening Sync settings and "Sync now". `docs/user/sync.md`, changelog line.
+The engine, crypto, Settings → Sync (server URL, connect, then unlock with the passphrase or recovery key, or create with a new passphrase and see the recovery key once; once on: status, Sync now, linked accounts with unlink, devices with sign out, passphrase change, show recovery key, turn off, delete the sync account), palette entries "Settings sync" and "Sync settings now", `docs/user/sync.md` (Help → Syncing settings), a changelog line.
+
+- **Turning it on** is two steps. `settings_sync_connect` checks the server's `/v1/health` (protocol 1), then tries each signed-in account's fresh id_token against `/v1/session`. The first that's known gives a session, and the UI asks for the passphrase (`settings_sync_join`). If none is known, and at least one could be checked, the UI offers a new sync account (`settings_sync_create`). If no account could be checked at all, the error is shown rather than offering to create one. Cancelling a join revokes the device the session made.
+- **Fresh id_tokens** come from a forced token refresh (`AppState::fresh_id_token`, `auth::refresh_with_id_token`), which also saves the rotated tokens.
+- **Passphrases** are at least 10 characters. Argon2id runs on a blocking thread (64 MiB, 3 passes).
+- **Unlinking** an account marks the matching local account `unlinked`, so auto-linking doesn't put it straight back.
+- **Device names** are the PC's name (`COMPUTERNAME`, `/etc/hostname`).
+- **A server bug found here:** SvelteKit's CSRF check treated a bodyless `DELETE` or `PUT` without an `Origin` as a cross-site form and refused it (403). That broke revoke, unlink and delete account, but only in a built server, which is why stage 2's route tests (calling handlers directly) missed it. The server now trusts every origin (`csrf.trustedOrigins: ['*']`): nothing it serves uses cookies.
 
 **Tests.**
-- Rust: HLC ordering and clock skew, conflict resolution, encrypt/decrypt round trip, associated data stops a swapped blob, unknown keys and newer schema versions kept.
-- Fake Graph and fake Gmail issue signed id_tokens and serve JWKS and discovery.
-- E2E with two app instances (separate data dirs) against the real server: turn on in A, join from B with the passphrase, add a snippet in A and see it in B, edit the same split in both and the later one wins, a wrong passphrase is refused, a revoked device stops syncing.
-- **Canary**, like `telemetry.spec.ts`: seed a signature, snippet and address with known strings, sync, and fail if any of them appears in the server's SQLite file or request log.
+- Rust:
+  - crypto: round trip, associated data stops a swapped blob, tampering, wrong key, wrong passphrase, recovery key round trip, RFC 4648 base32, default cost
+  - clock: ordering, a clock going back, beating a slow clock after seeing a fast one, ties, implausible stamps
+  - store: only real changes are stamped, tombstones, remote changes aren't local ones, a change made during a push stays dirty, first sync sends everything with defaults at zero
+  - engine merge: later wins, earlier loses but still goes up, new settings and removals arrive, untouched defaults take the other device's value, items it mustn't take are skipped
+  - the sealed secret, server URL rules (https except for this PC)
+  - the protocol types read and write `server/protocol-fixtures/examples.json` unchanged
+- Fake Graph issues RS256 id_tokens under a fixed `{tenantid}` issuer template, with discovery and keys at `/oauth/v2.0/.well-known/openid-configuration`, shared by both fakes in the two-mailbox proxy. `tests/harness/sync-server.ts` builds the real server (when its sources change; global setup does it once) and runs one per test.
+- E2E (`settings-sync.spec.ts`), two app instances with separate data dirs against the real server:
+  - settings made before sync go up
+  - B joins with the passphrase and gets A's snippet
+  - B's split shows as a tab on A
+  - both edit one snippet and the later wins on both
+  - device-only settings stay put
+  - a wrong passphrase is refused, and the recovery key unlocks (typed loosely)
+  - a device signed out from another stops and says so
+  - turning off keeps settings, and rejoining asks for the passphrase
+  - http to another host is refused, as is a server that isn't a sync server
+  - a second account on the PC is linked automatically
+  - **canary**: none of the snippet, signature and split strings, nor the `snippet:`/`signature:`/`split:` key names, appear in the server's SQLite file, WAL or log
 
 ### Stage 4: synced account list
 
-`account:<provider>:<address>` items. A device that doesn't have a synced account shows it under Settings → Accounts as "Not signed in on this device" with a sign-in button, and the footer suggests it once. Removing an account on one device asks whether to remove it everywhere.
+`sync/accounts.rs`. One synced setting per account, `account:<provider>:<lowercase address>` = `{app, name}`.
 
-**Tests.** E2E: an account added in A shows in B as not signed in; signing in from there works against the fake server; "remove everywhere" removes it in B.
+- **Written when an account signs in** (`sign_in`, which also takes a `login_hint` now). Migration `0018_account_items.sql` writes items for the accounts already on a PC, queued to go up at the zero stamp, so a PC already syncing shares its accounts and loses to anything another PC said about them.
+- **Offering them.** Accounts on the list that aren't on this PC, and aren't hidden here, are listed under Settings → Accounts as "On your other PCs" (`synced_accounts`, only while sync is on). They have **Sign in** (the account's app, its address as the login hint; disabled with a hint when it uses the user's own app and this PC has none) and **Hide** (`account_dismissed:<provider>:<address>`, local). When one first arrives from another PC, a toast says so (`mail.reloadSettings`). That's naturally once: it only fires for keys that just changed.
+- **Signing out**, with sync on, asks **This PC only** (hides it here; the item stays) or **Everywhere** (`forget_everywhere` deletes the item, which goes up as a tombstone). When a tombstone for an account arrives, a PC that has the account signs it out (`removed_elsewhere`, then `commands::remove_account`). Without sync, Sign out works as before. Signing in again anywhere writes the item with a new stamp, so it comes back everywhere.
+- **Account ids are reused** (no AUTOINCREMENT). Removing an account now also clears its `settings_sync_link:<id>`, so a later account with the same id is linked rather than inheriting "linked".
+
+**Tests.**
+- Rust: offered until signed in or hidden, and signing in un-hides; a removal everywhere finds the local account and goes up as a tombstone; the migration writes items for existing accounts, queued at the zero stamp.
+- E2E, two PCs with the two-mailbox fake:
+  - an account added on A is announced on B by a toast and offered under Settings → Accounts (B's own account isn't offered)
+  - Sign in there adds it, and the sign-in page got the address as `login_hint`
+  - This PC only removes it from B without offering it again, and A keeps it
+  - added back on B and then removed Everywhere, it disappears from A as well
 
 ### Stage 5: shared mailboxes and send-as
 
@@ -192,9 +234,10 @@ The feature from PLAN.md Tier 3, with its per-account configuration stored as sy
 ## Risks and open questions
 
 - **Microsoft id_token issuer.** Multi-tenant tokens have issuer `https://login.microsoftonline.com/{tid}/v2.0`; personal accounts use tenant `9188040d-6c67-4c5b-b112-36a304b66dad`. Check with a work and an Outlook.com account before stage 2 relies on it.
-- **id_token on refresh.** Entra returns one on refresh with `openid` in the scopes; confirm Google does too for the stored refresh token. If not, linking falls back to the id_token from the original sign-in, which is too old, so a Google account would need a reconnect to link.
+- **id_token on refresh.** Entra returns one on refresh with `openid` in the scopes. Google's documentation says a refresh returns one too when `openid` was granted, but this is untested (the fake Gmail doesn't issue id_tokens, and PeetMail's own Google app isn't registered). If a refresh returns none, connecting or linking with that account says "reconnect it under Settings → Accounts"; check with a real Google account before relying on it.
 - **Concurrent reorders.** Two devices reordering splits offline can interleave oddly. Fractional indexes keep it from losing items; the order may just need fixing by hand.
 - **Error text.** Sync server errors go through `scrub` before reaching Sentry or logs, like Graph errors.
 - **Rate limiting.** The server has none. Signing in needs a valid id_token for an accepted app, so abuse is limited to a signed-in device hammering its own account; a reverse proxy can rate-limit if that ever matters.
-- **Publishing the image.** CI builds it; pushing to `ghcr.io/billpeet/peetmail-sync` on release is a small release.yml job, left until a PeetMail release can use it (stage 3).
+- **Publishing the image.** CI builds it; pushing to `ghcr.io/billpeet/peetmail-sync` on release is a small release.yml job. Now that the client exists it's worth doing with the first release that ships stage 3.
+- **Real providers end to end.** Everything is tested against the fakes. Before announcing it, sign in from two PCs with a real work account and a real Outlook.com account against a real server behind HTTPS.
 - **Web client later.** The crypto choices (AES-GCM, Argon2id via WASM) keep it possible; a web client would also need its own OAuth redirect for the id_token, so the server would accept a third audience.
