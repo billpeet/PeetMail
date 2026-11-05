@@ -41,6 +41,7 @@
   /** An answerable invite is on screen (reader, or the reading pane). */
   const hasInvite = () =>
     ready() &&
+    !mail.batching &&
     (mail.view === "reader" || mail.previewing) &&
     !!mail.invite &&
     !mail.invite.event.isOrganizer &&
@@ -52,7 +53,14 @@
   const inSnoozed = () => ready() && mail.mailbox === "snoozed" && mail.search === null;
   const inReader = () => ready() && mail.view === "reader";
   const hasThread = () => ready() && !!mail.current;
+  /** One conversation is on screen to answer: not while a selection covers the reading pane. */
+  const hasOne = () => hasThread() && !mail.batching;
   const inInbox = () => ready() && mail.search === null && mail.mailbox === "inbox";
+  /** Focus is in a text field (the search box). */
+  const typing = () => {
+    const el = document.activeElement as HTMLElement | null;
+    return !!el && (el.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName));
+  };
 
   /** Names of the mailboxes, for the list header. */
   const MAILBOX_TITLES: Record<MailView, string> = { inbox: "Inbox", done: "Done", sent: "Sent", drafts: "Drafts", snoozed: "Snoozed", scheduled: "Scheduled", all: "All mail", trash: "Trash" };
@@ -141,6 +149,8 @@
       { id: "list.up.arrow", keys: "ArrowUp", label: "Previous conversation", group: "Navigate", when: inList, run: () => mail.move(-1) },
       { id: "list.open", keys: "Enter", label: "Open conversation", group: "Navigate", when: inList, run: () => mail.open() },
       { id: "reader.back", keys: "Escape", label: "Back to list", group: "Navigate", when: inReader, run: () => mail.back() },
+      // Before search.clear: Esc lets go of a selection first, then closes the search.
+      { id: "select.clear", keys: "Escape", label: "Clear selection", group: "Select", when: () => inList() && mail.batching, run: () => mail.clearChecked() },
       { id: "search.clear", keys: "Escape", label: "Clear search", group: "Navigate", when: () => inList() && mail.search !== null, run: () => mail.endSearch() },
       { id: "list.top", keys: "g g", label: "Jump to top", group: "Navigate", when: inList, run: () => mail.select(0) },
       { id: "list.bottom", keys: "G", label: "Jump to bottom", group: "Navigate", when: inList, run: () => mail.select(mail.threads.length - 1) },
@@ -164,9 +174,18 @@
       { id: "calendar.today", keys: "t", label: "This week", group: "Calendar", when: inCalendar, run: () => calendar.thisWeek() },
       { id: "calendar.back", keys: "Escape", label: "Back to inbox", group: "Calendar", when: inCalendar, run: () => mail.back() },
 
+      // A selection: triage keys act on all of it, and one z undoes it.
+      { id: "select.toggle", keys: "x", label: "Select conversation", group: "Select", when: () => inList() && !!mail.current, run: () => mail.toggleChecked() },
+      { id: "select.down", keys: "J", label: "Select and move down", group: "Select", when: inList, run: () => mail.extendChecked(1) },
+      { id: "select.up", keys: "K", label: "Select and move up", group: "Select", when: inList, run: () => mail.extendChecked(-1) },
+      { id: "select.down.arrow", keys: "shift+ArrowDown", label: "Select and move down", group: "Select", when: inList, run: () => mail.extendChecked(1) },
+      { id: "select.up.arrow", keys: "shift+ArrowUp", label: "Select and move up", group: "Select", when: inList, run: () => mail.extendChecked(-1) },
+      // Ctrl chords reach the keymap from text fields too; there Ctrl+A selects the text.
+      { id: "select.all", keys: "ctrl+a", label: "Select all in this view", group: "Select", when: () => inList() && !typing(), run: () => mail.checkAll() },
+
       // In Done and Trash these bring mail back to the inbox (Mail.triageFor).
-      { id: "triage.archive", keys: "e", label: "Archive (in Done: back to Inbox)", group: "Triage", when: hasThread, run: () => mail.act(mail.triageFor("archive")) },
-      { id: "triage.trash", keys: "#", label: "Delete (in Trash: restore)", group: "Triage", when: hasThread, run: () => mail.act(mail.triageFor("trash")) },
+      { id: "triage.archive", keys: "e", label: "Archive (in Done: back to Inbox)", group: "Triage", when: hasThread, run: () => mail.triage(mail.triageFor("archive")) },
+      { id: "triage.trash", keys: "#", label: "Delete (in Trash: restore)", group: "Triage", when: hasThread, run: () => mail.triage(mail.triageFor("trash")) },
       { id: "triage.read", keys: "u", label: "Toggle read", group: "Triage", when: () => hasThread() && !inSnoozed(), run: () => mail.toggleRead() },
       { id: "snoozed.wake", keys: "u", label: "Back to inbox now (in Snoozed)", group: "Triage", when: () => hasThread() && inSnoozed(), run: () => mail.unsnooze() },
       { id: "triage.flag", keys: "s", label: "Toggle flag", group: "Triage", when: hasThread, run: () => mail.toggleFlag() },
@@ -174,9 +193,9 @@
       { id: "triage.undo", keys: "z", label: "Undo", group: "Triage", when: ready, run: () => mail.undo() },
 
       { id: "compose.new", keys: "c", label: "Compose", group: "Write", when: base, run: () => mail.compose() },
-      { id: "compose.reply", keys: "r", label: "Reply", group: "Write", when: hasThread, run: () => mail.respond("reply") },
-      { id: "compose.replyAll", keys: "a", label: "Reply all", group: "Write", when: hasThread, run: () => mail.respond("replyAll") },
-      { id: "compose.forward", keys: "f", label: "Forward", group: "Write", when: hasThread, run: () => mail.respond("forward") },
+      { id: "compose.reply", keys: "r", label: "Reply", group: "Write", when: hasOne, run: () => mail.respond("reply") },
+      { id: "compose.replyAll", keys: "a", label: "Reply all", group: "Write", when: hasOne, run: () => mail.respond("replyAll") },
+      { id: "compose.forward", keys: "f", label: "Forward", group: "Write", when: hasOne, run: () => mail.respond("forward") },
 
       { id: "layout.toggle", keys: "v", label: "Toggle reading pane", group: "App", when: ready, run: () => mail.toggleLayout() },
       { id: "calendar.pane", keys: "0", label: "Toggle calendar", group: "Calendar", when: base, run: () => mail.toggleCalendarPane() },
@@ -287,6 +306,12 @@
         <span data-testid="thread-count" class="text-xs text-ink-500">{count(mail.conversationCount, "conversation")}</span>
         <button data-testid="search-close" title="Close search (Esc)" aria-label="Close search" onclick={() => mail.endSearch()} class="icon-btn"><X size={16} /></button>
       {/if}
+      {#if mail.batching}
+        <span data-testid="selection-count" class="ml-3 flex items-center gap-2 rounded-md bg-ink-800 px-2 py-0.5 text-xs text-ink-100">
+          {mail.batch.length} selected
+          <button data-testid="selection-clear" title="Clear selection (Esc)" aria-label="Clear selection" onclick={() => mail.clearChecked()} class="text-ink-500 hover:text-ink-100"><X size={12} /></button>
+        </span>
+      {/if}
       <span class="ml-auto flex items-center gap-1 pl-4">
         <button data-testid="header-compose" title="Compose (C)" aria-label="Compose" onclick={() => mail.compose()} class="icon-btn"><SquarePen size={17} /></button>
         {#if mail.search === null}
@@ -332,7 +357,15 @@
           />
         </div>
         <div data-testid="preview-pane" class="min-w-0 flex-1">
-          {#if mail.current}
+          {#if mail.batching}
+            <div data-testid="selection-summary" class="grid h-full place-items-center text-sm text-ink-500">
+              <div class="space-y-3 text-center">
+                <p class="text-base text-ink-100">{count(mail.batch.length, "conversation")} selected</p>
+                <p><kbd>e</kbd> archive · <kbd>#</kbd> delete · <kbd>u</kbd> read · <kbd>s</kbd> flag · <kbd>h</kbd> snooze</p>
+                <p><kbd>x</kbd> select or deselect · <kbd>Esc</kbd> clear</p>
+              </div>
+            </div>
+          {:else if mail.current}
             <Reader />
           {:else}
             <div class="grid h-full place-items-center text-sm text-ink-500">Nothing selected</div>
