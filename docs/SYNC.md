@@ -7,7 +7,7 @@ Settings, signatures, snippets, splits, the list of accounts and (later) shared 
 | Stage | State |
 |---|---|
 | 1 Item-shaped settings | Done |
-| 2 Sync server | Not started |
+| 2 Sync server | Done (image built in CI, not yet published) |
 | 3 Client sync and Settings → Sync | Not started |
 | 4 Synced account list | Not started |
 | 5 Shared mailboxes and send-as | Not started (feature itself is new, see PLAN.md Tier 3) |
@@ -73,12 +73,13 @@ CREATE TABLE sync_items (
 ### On the server
 
 ```
-users       (id, created_at, wrapped_key, kdf_params)
+users       (id, created_at, wrapped_key, kdf_params, seq)          -- seq: the last version handed out
 identities  (id, user_id, kind, subject, email_hint, linked_at)   UNIQUE (kind, subject)
 devices     (id, user_id, name, token_hash, created_at, last_seen_at, revoked_at)
 items       (user_id, item_id, seq, blob, deleted, updated_at)    PRIMARY KEY (user_id, item_id)
-user_seq    (user_id, seq)                                        -- per-user counter
 ```
+
+Drizzle schema in `server/src/lib/server/schema.ts`, migrations in `server/drizzle/` (applied at startup).
 
 `email_hint` is shown only in the server's own logs and device list; it is the one piece of personal data the server keeps, because a self-hoster needs to know whose account is whose.
 
@@ -94,21 +95,25 @@ user_seq    (user_id, seq)                                        -- per-user co
 
 ## Protocol
 
-JSON over HTTPS, `Authorization: Bearer <device token>` on everything except sign-in.
+JSON (camelCase) over HTTPS, `Authorization: Bearer <device token>` on everything except health and sign-in. Types and request checks: `server/src/lib/protocol.ts`; one example of each body: `server/protocol-fixtures/examples.json`.
 
 | Call | Does |
 |---|---|
-| `POST /v1/session` `{id_token, device_name}` | Verifies the token, finds the user by identity. Returns `{device_token, user, wrapped_key, kdf_params}`, or `404 no_user` if the identity isn't linked. |
-| `POST /v1/users` `{id_token, device_name, wrapped_key, kdf_params}` | Creates a sync account with this identity. Only when the identity is allowed to register (see Self-hosting). |
-| `POST /v1/identities` `{id_token}` | Links another mail account to the signed-in user. `409 linked_elsewhere` if it belongs to another user. |
-| `DELETE /v1/identities/:id` | Unlinks; refused for the last one. |
-| `GET /v1/items?since=<seq>` | Items with `seq > since`, oldest first, paged; tombstones included. Returns the new cursor. |
-| `PUT /v1/items` `[{id, blob, deleted, base_seq}]` | Compare-and-swap per item: writes when the stored `seq` equals `base_seq` (or the item is new), assigning the next `seq`. Each item returns `ok {seq}` or `conflict {seq, blob}`. |
-| `GET /v1/devices`, `DELETE /v1/devices/:id` | List and revoke devices (revoking your own device signs it out of sync). |
-| `PUT /v1/key` `{wrapped_key, kdf_params}` | Passphrase change. |
+| `GET /v1/health` | `{ok, protocol, version}`, so PeetMail can check a URL before signing in. |
+| `POST /v1/session` `{provider, idToken, deviceName}` | Verifies the token, finds the user by identity, signs a new device in. Returns `{deviceId, deviceToken, wrappedKey, kdfParams}`, or `404 no_user` if the identity isn't linked (never a new user). |
+| `POST /v1/users` `{provider, idToken, deviceName, wrappedKey, kdfParams}` | Creates a sync account with this identity and signs the device in. `403 registration_closed` unless `ALLOW_REGISTER` lets the identity in; `409 already_registered` if it's already linked. |
+| `GET /v1/identities` | The linked mail accounts: `[{id, provider, email, linkedAt}]`. |
+| `POST /v1/identities` `{provider, idToken}` | Links another mail account (harmless if already linked to this user). `409 linked_elsewhere` if it belongs to another user. |
+| `DELETE /v1/identities/:id` | Unlinks; `409 last_identity` for the last one. |
+| `GET /v1/items?since=<seq>&limit=<n>` | Items with `seq > since`, oldest first, at most 1000 a page; tombstones included. `{items: [{id, seq, blob, deleted}], cursor, more}`. |
+| `PUT /v1/items` `{items: [{id, blob, deleted, baseSeq}]}` | Compare-and-swap per item, in one transaction: writes when the stored `seq` equals `baseSeq` (or there's no stored item), assigning the next `seq`. An item that exists but was pushed with `baseSeq: null` conflicts too. Each returns `{id, status: "ok", seq}` or `{id, status: "conflict", seq, blob, deleted}`. At most 500 items a push and 10,000 per user (`413 too_many_items`). |
+| `GET /v1/devices`, `DELETE /v1/devices/:id` | List (`[{id, name, createdAt, lastSeenAt, current}]`) and revoke devices. Revoking your own signs it out of sync; a revoked device's token gets `401 device_revoked`. |
+| `PUT /v1/key` `{wrappedKey, kdfParams}` | Passphrase change. |
 | `DELETE /v1/users/me` | Deletes the sync account and everything in it. |
 
-On a conflict the client decrypts the server's copy, keeps whichever has the later clock, and pushes again with the new `base_seq` if its own value won. The server never merges.
+Errors are `{error, message}`: a stable code for the client and a sentence it can show. Device tokens are `pmd_` plus 32 random bytes, stored as SHA-256 hashes.
+
+On a conflict the client decrypts the server's copy, keeps whichever has the later clock, and pushes again with the new `baseSeq` if its own value won. The server never merges.
 
 Older clients keep items they don't understand (an unknown key or a newer `v`) and never delete them. A newer schema for an existing key means a new key name (`snippet2:<id>`), so old clients keep working with the old one.
 
@@ -124,26 +129,25 @@ The sync account belongs to a person, not to a mail account. Any number of mail 
 - **Already linked elsewhere.** Auto-linking skips an account that belongs to another sync account and says so in Settings → Sync. Merging two sync accounts is out of scope for now.
 - **Removing a mail account** from PeetMail doesn't unlink it; it can still sign a future device in. Unlinking is a separate action.
 - **Losing a mail account** (leaving a job): device tokens don't depend on the mail accounts staying valid, so any device already in sync keeps working and can link another account. Settings → Sync suggests linking a personal account when every linked account is from one organisation.
-- **Refreshing an id_token.** The server accepts id_tokens up to 10 minutes old (`iat`) for the configured audiences. An id_token proves identity only; the data stays safe behind the passphrase even if one leaks.
+- **Refreshing an id_token.** The server accepts id_tokens up to 10 minutes old (`iat`, with a minute's clock tolerance), RS256-signed with the provider's published keys, for the configured audiences. Microsoft's issuer must be its tenant's own (`.../{tid}/v2.0`). An id_token proves identity only; the data stays safe behind the passphrase even if one leaks.
+- **Which address counts.** Microsoft: `preferred_username` (the UPN for work accounts, whose domain the tenant verified; the address for personal ones). Entra's `email` claim is unverified and never used. Google: `email`, only when `email_verified`. This is the address `ALLOW_REGISTER` matches and the server keeps as `email_hint`.
 
 ## Self-hosting
 
-`server/` builds a Node app and a Docker image (`ghcr.io/billpeet/peetmail-sync`). Configuration through environment variables:
+`server/` builds a Node app (`node build`) and a Docker image (`server/Dockerfile`, built from the repository root; CI builds it, nothing publishes it yet). All the settings are in [server/README.md](../server/README.md); the ones that shape the design:
 
 | Variable | Meaning |
 |---|---|
-| `DATABASE_PATH` | SQLite file (default `/data/sync.db`). |
-| `ORIGIN` | Public URL. HTTPS is required for anything not on localhost; the client refuses plain http to other hosts. |
-| `ALLOW_REGISTER` | Who may create a sync account: addresses, `@domain`, or `tenant:<tid>`. Required, with no open default, since the server is reachable from the internet. Linking more accounts to an existing user is always allowed. |
-| `MICROSOFT_CLIENT_IDS`, `GOOGLE_CLIENT_IDS` | Accepted id_token audiences. Default: PeetMail's built-in apps. Add your own app's ID if you use one. |
-| `OIDC_ISSUERS` | Override of the issuer discovery URLs. Exists so the test harness can point the server at the fake Graph and Gmail; also lets an air-gapped install use a proxy. |
+| `ALLOW_REGISTER` | Who may create a sync account: addresses, `@domain`, `tenant:<tid>`, `*` or `none`. Required: the server won't start without it, since it's reachable from the internet. Linking more accounts to an existing user is always allowed. |
+| `MICROSOFT_CLIENT_IDS`, `GOOGLE_CLIENT_IDS` | Accepted id_token audiences. Microsoft defaults to PeetMail's built-in app; Google is off until set (PeetMail's Google app isn't registered yet). |
+| `MICROSOFT_DISCOVERY_URL`, `GOOGLE_DISCOVERY_URL` | The OpenID configuration documents. Overridable so tests (and stage 3's E2E harness) can point the server at a local issuer. |
 
-Backups are the SQLite file. A user's guide goes in `docs/user/sync.md` (setup for users) and `server/README.md` (running the server).
+HTTPS is the reverse proxy's job; the client will refuse plain http except to localhost. Backups are the SQLite file. User help goes in `docs/user/sync.md` (stage 3); running the server is `server/README.md`.
 
 ## Repo layout
 
 - `pnpm-workspace.yaml` with the root app and `server/`.
-- `server/`: SvelteKit (adapter-node), Drizzle, `better-sqlite3`, Tailwind for the few pages it has (a status page, later the web client). API routes under `src/routes/v1/`. Its own `pnpm check` and Vitest, wired into the root `pnpm verify`.
+- `server/`: SvelteKit 3 (adapter-node), Drizzle 0.45 with `better-sqlite3` (prebuilt binaries for every platform, so pnpm is told not to compile it), `jose` for id_tokens, Tailwind for its one page. `src/lib/server/service.ts` holds every call's logic independent of HTTP; `src/routes/v1/` are thin handlers. `pnpm server:check` and `pnpm server:test` are part of the root `pnpm verify`, and CI's `server` job also builds the Docker image.
 - Protocol types are hand-written on both sides (`server/src/lib/protocol.ts`, `src-tauri/src/sync/protocol.rs`), kept honest by shared JSON fixtures in `server/protocol-fixtures/` that a Vitest and a Rust test both read, and by the E2E tests running against the real server.
 - Rust: `src-tauri/src/sync/` (`mod.rs` engine, `crypto.rs`, `protocol.rs`, `hlc.rs`).
 
@@ -157,9 +161,13 @@ Split `splits`, `snippets` and `signatures` into per-item keys with a migration;
 
 ### Stage 2: sync server
 
-`server/` package, schema, the calls above, id_token verification against JWKS (cached), device tokens (random, stored hashed), `ALLOW_REGISTER`, Docker image built in CI.
+`server/` package, schema, the calls above, id_token verification against JWKS (discovery cached for a day), device tokens (random, stored hashed), `ALLOW_REGISTER`, a status page, the Docker image built in CI. Nothing in PeetMail uses it yet, so no changelog line.
 
-**Tests.** Vitest against a temp SQLite: compare-and-swap (stale `base_seq` conflicts, new items, tombstones), paging by `seq`, per-user isolation, register allowlist, link/unlink rules (`linked_elsewhere`, last identity), revoked device rejected, expired/wrong-audience/wrong-issuer tokens rejected. A test JWKS signs the tokens.
+**Tests** (Vitest, a fresh in-memory SQLite each):
+- Service: compare-and-swap (the current version wins, stale and blind pushes get the server's copy, one conflict doesn't block the rest), tombstones, paging by `seq`, per-user isolation and versions, the item cap leaves nothing half-written, registration rules, sign-in never creates a user, link/unlink rules, revoked and other users' devices, last-seen throttling, passphrase change, account deletion.
+- id_tokens, signed by a local issuer (`testing/issuer.ts`, shaped like Microsoft's and Google's): one identity across two apps (tenant + oid), wrong audience, a token claiming another tenant's issuer, the unverified `email` claim ignored, Google's verified address, Google off by default, expired, stale, forged, unknown key, `alg: none`, an unreachable provider (502, not a refusal).
+- Routes: a sync account's whole life through the real handlers with real tokens, each response checked against the shape of its example in `protocol-fixtures/`; bad JSON and bad fields get `400` with a message.
+- By hand: the built server and the Docker image start, migrate, answer `/v1/health`, and refuse to start without `ALLOW_REGISTER`.
 
 ### Stage 3: client sync and Settings → Sync
 
@@ -187,4 +195,6 @@ The feature from PLAN.md Tier 3, with its per-account configuration stored as sy
 - **id_token on refresh.** Entra returns one on refresh with `openid` in the scopes; confirm Google does too for the stored refresh token. If not, linking falls back to the id_token from the original sign-in, which is too old, so a Google account would need a reconnect to link.
 - **Concurrent reorders.** Two devices reordering splits offline can interleave oddly. Fractional indexes keep it from losing items; the order may just need fixing by hand.
 - **Error text.** Sync server errors go through `scrub` before reaching Sentry or logs, like Graph errors.
+- **Rate limiting.** The server has none. Signing in needs a valid id_token for an accepted app, so abuse is limited to a signed-in device hammering its own account; a reverse proxy can rate-limit if that ever matters.
+- **Publishing the image.** CI builds it; pushing to `ghcr.io/billpeet/peetmail-sync` on release is a small release.yml job, left until a PeetMail release can use it (stage 3).
 - **Web client later.** The crypto choices (AES-GCM, Argon2id via WASM) keep it possible; a web client would also need its own OAuth redirect for the id_token, so the server would accept a third audience.

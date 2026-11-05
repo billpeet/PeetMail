@@ -1,0 +1,43 @@
+{
+  "$comment": "One example of each sync request and response (docs/SYNC.md → Protocol). The server's tests check that it accepts these requests and answers in these shapes; the Rust client's tests check that it reads and writes them. Change both sides with this file.",
+  "health.response": { "ok": true, "protocol": 1, "version": "0.1.0" },
+  "session.request": { "provider": "microsoft", "idToken": "eyJhbGciOiJSUzI1NiJ9.e30.c2ln", "deviceName": "Desk PC" },
+  "users.request": {
+    "provider": "microsoft",
+    "idToken": "eyJhbGciOiJSUzI1NiJ9.e30.c2ln",
+    "deviceName": "Desk PC",
+    "wrappedKey": "AAECAwQFBgcICQoLDA0ODw",
+    "kdfParams": { "alg": "argon2id", "m": 65536, "t": 3, "p": 1, "salt": "c2FsdHNhbHQ" }
+  },
+  "session.response": {
+    "deviceId": 1,
+    "deviceToken": "pmd_9kq2x0Qv8m3LkYp1s7Tz4WcR6uN5bHjE2aFgDiOlVxM",
+    "wrappedKey": "AAECAwQFBgcICQoLDA0ODw",
+    "kdfParams": { "alg": "argon2id", "m": 65536, "t": 3, "p": 1, "salt": "c2FsdHNhbHQ" }
+  },
+  "identities.request": { "provider": "google", "idToken": "eyJhbGciOiJSUzI1NiJ9.e30.c2ln" },
+  "identity.response": { "id": 2, "provider": "google", "email": "sam@example.com", "linkedAt": "2026-11-05T00:00:00.000Z" },
+  "identities.response": [{ "id": 1, "provider": "microsoft", "email": "priya@fabrikam.io", "linkedAt": "2026-11-05T00:00:00.000Z" }],
+  "items.push.request": {
+    "items": [
+      { "id": "p0Yj8sX2n4kQ", "blob": "bm9uY2VjaXBoZXJ0ZXh0", "deleted": false, "baseSeq": null },
+      { "id": "Zr7Tq1mW9cLe", "blob": "dG9tYnN0b25l", "deleted": true, "baseSeq": 4 }
+    ]
+  },
+  "items.push.response": {
+    "results": [
+      { "id": "p0Yj8sX2n4kQ", "status": "ok", "seq": 7 },
+      { "id": "Zr7Tq1mW9cLe", "status": "conflict", "seq": 6, "blob": "c2VydmVyY29weQ", "deleted": false }
+    ]
+  },
+  "items.pull.response": {
+    "items": [{ "id": "p0Yj8sX2n4kQ", "seq": 7, "blob": "bm9uY2VjaXBoZXJ0ZXh0", "deleted": false }],
+    "cursor": 7,
+    "more": false
+  },
+  "devices.response": [
+    { "id": 1, "name": "Desk PC", "createdAt": "2026-11-05T00:00:00.000Z", "lastSeenAt": "2026-11-05T00:00:00.000Z", "current": true }
+  ],
+  "key.request": { "wrappedKey": "EBESExQVFhcYGRobHB0eHw", "kdfParams": { "alg": "argon2id", "m": 65536, "t": 3, "p": 1, "salt": "bmV3c2FsdA" } },
+  "error.response": { "error": "no_user", "message": "This mail account isn't linked to a sync account on this server." }
+}

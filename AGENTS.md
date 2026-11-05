@@ -6,7 +6,7 @@ Keyboard-first mail + calendar client for Windows and Linux: Tauri 2 (Rust core)
 
 Run the narrowest check that covers the change, then widen:
 
-1. `pnpm check` for any TS or Svelte edit.
+1. `pnpm check` for any TS or Svelte edit; `pnpm server:check` and `pnpm server:test` for anything in `server/` (the self-hosted sync server, `server/README.md`).
 2. `pnpm test:unit` (Vitest, `src/**/*.test.ts`) and `pnpm test:rust` (`cargo test`) for logic changes.
 3. `pnpm test:e2e` for anything a user can see or that touches sync, auth or IPC. Playwright drives the real app against a fake Microsoft Graph, headless.
 4. For UI work, look at it: `pnpm drive start`, drive it with keys, `pnpm drive shot`, and read the PNG.

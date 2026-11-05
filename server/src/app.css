@@ -1,0 +1,13 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink-50: #f4f4f5;
+  --color-ink-100: #e4e4e7;
+  --color-ink-300: #a1a1aa;
+  --color-ink-950: #1c1c1f;
+}
+
+body {
+  background: var(--color-ink-950);
+  font-family: system-ui, sans-serif;
+}

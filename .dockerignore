@@ -1,0 +1,10 @@
+# Only server/Dockerfile builds from here: let in the sync server and the workspace manifests.
+*
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!server/
+server/node_modules
+server/build
+server/.svelte-kit
+server/data
