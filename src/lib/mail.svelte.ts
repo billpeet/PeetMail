@@ -1,6 +1,8 @@
 import {
   api,
+  settingsSyncApi,
   type Action,
+  type ElsewhereAccount,
   type Bootstrap,
   type Signature,
   type DraftDoc,
@@ -506,6 +508,7 @@ class MailStore {
   async init() {
     try {
       this.boot = await api.bootstrap();
+      this.refreshElsewhere();
       api.listSnippets().then((s) => (this.snippets = s)).catch(() => {});
       api.listSignatures().then((s) => (this.signatures = s)).catch(() => {});
       calendar.setWeekStartsOn(this.boot.preferences.weekStartsOn);
@@ -528,9 +531,28 @@ class MailStore {
     await this.refresh();
   }
 
+  /** Accounts another PC syncs that aren't here (Settings → Accounts offers them). */
+  elsewhere = $state<ElsewhereAccount[]>([]);
+
+  async refreshElsewhere() {
+    this.elsewhere = await settingsSyncApi.elsewhere().catch(() => []);
+  }
+
   /** Settings another device changed (settings sync): shows their new values. */
   async reloadSettings(keys: string[]) {
     if (!this.boot) return;
+    if (keys.some((k) => k.startsWith("account:"))) {
+      // An account added on another PC is offered here (once, as it arrives); one signed out
+      // everywhere has gone from this PC too.
+      const before = new Set(this.elsewhere.map((a) => `${a.provider}:${a.email}`));
+      await this.init();
+      const arrived = this.elsewhere.filter((a) => !before.has(`${a.provider}:${a.email}`) && keys.includes(`account:${a.provider}:${a.email}`));
+      if (arrived.length) {
+        const who = arrived.length === 1 ? arrived[0].email : `${arrived.length} accounts`;
+        this.showToast({ text: `${who} ${arrived.length === 1 ? "is" : "are"} on your other PC. Sign in here from Settings → Accounts.` });
+      }
+      return;
+    }
     const { preferences } = await api.bootstrap();
     this.boot = { ...this.boot, preferences };
     calendar.setWeekStartsOn(preferences.weekStartsOn);

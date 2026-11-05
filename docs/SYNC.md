@@ -9,7 +9,7 @@ Settings, signatures, snippets, splits, the list of accounts and (later) shared 
 | 1 Item-shaped settings | Done |
 | 2 Sync server | Done (image built in CI, not yet published) |
 | 3 Client sync and Settings → Sync | Done (Microsoft accounts tested end to end; Google untested, see Risks) |
-| 4 Synced account list | Not started |
+| 4 Synced account list | Done |
 | 5 Shared mailboxes and send-as | Not started (feature itself is new, see PLAN.md Tier 3) |
 
 ## Decisions
@@ -30,7 +30,7 @@ Settings, signatures, snippets, splits, the list of accounts and (later) shared 
 | Syncs | Stays on the device |
 |---|---|
 | Splits, hide empty splits, signatures, snippets, undo-send delay, week start, notifications | Pane and list widths, layout (depends on the screen), close to tray |
-| The list of accounts: provider, address, which OAuth app (stage 4) | Tokens, cache window, body cache size |
+| The list of accounts: provider, address, which OAuth app, display name (stage 4) | Tokens, cache window, body cache size |
 | | Update channel, install ID, changelog seen, privacy notice seen, restart-to-update |
 | Later: shared mailboxes and send-as per account, "my organisation adds my signature", editable shortcuts | Crash reports and usage data consent (a new machine asks for itself) |
 | | Sync cursors and per-account bookkeeping (`history_key`, `all_folders_key`, snooze label keys) |
@@ -212,9 +212,20 @@ The engine, crypto, Settings → Sync (server URL, connect, then unlock with the
 
 ### Stage 4: synced account list
 
-`account:<provider>:<address>` items. A device that doesn't have a synced account shows it under Settings → Accounts as "Not signed in on this device" with a sign-in button, and the footer suggests it once. Removing an account on one device asks whether to remove it everywhere.
+`sync/accounts.rs`. One synced setting per account, `account:<provider>:<lowercase address>` = `{app, name}`.
 
-**Tests.** E2E: an account added in A shows in B as not signed in; signing in from there works against the fake server; "remove everywhere" removes it in B.
+- **Written when an account signs in** (`sign_in`, which also takes a `login_hint` now). Migration `0018_account_items.sql` writes items for the accounts already on a PC, queued to go up at the zero stamp, so a PC already syncing shares its accounts and loses to anything another PC said about them.
+- **Offering them.** Accounts on the list that aren't on this PC, and aren't hidden here, are listed under Settings → Accounts as "On your other PCs" (`synced_accounts`, only while sync is on). They have **Sign in** (the account's app, its address as the login hint; disabled with a hint when it uses the user's own app and this PC has none) and **Hide** (`account_dismissed:<provider>:<address>`, local). When one first arrives from another PC, a toast says so (`mail.reloadSettings`). That's naturally once: it only fires for keys that just changed.
+- **Signing out**, with sync on, asks **This PC only** (hides it here; the item stays) or **Everywhere** (`forget_everywhere` deletes the item, which goes up as a tombstone). When a tombstone for an account arrives, a PC that has the account signs it out (`removed_elsewhere`, then `commands::remove_account`). Without sync, Sign out works as before. Signing in again anywhere writes the item with a new stamp, so it comes back everywhere.
+- **Account ids are reused** (no AUTOINCREMENT). Removing an account now also clears its `settings_sync_link:<id>`, so a later account with the same id is linked rather than inheriting "linked".
+
+**Tests.**
+- Rust: offered until signed in or hidden, and signing in un-hides; a removal everywhere finds the local account and goes up as a tombstone; the migration writes items for existing accounts, queued at the zero stamp.
+- E2E, two PCs with the two-mailbox fake:
+  - an account added on A is announced on B by a toast and offered under Settings → Accounts (B's own account isn't offered)
+  - Sign in there adds it, and the sign-in page got the address as `login_hint`
+  - This PC only removes it from B without offering it again, and A keeps it
+  - added back on B and then removed Everywhere, it disappears from A as well
 
 ### Stage 5: shared mailboxes and send-as
 

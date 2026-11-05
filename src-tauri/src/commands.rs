@@ -122,14 +122,18 @@ pub fn cancel_sign_in(state: State<'_, AppState>) {
 /// Signs in a new (or returning) account. `oauth_app` picks the app: "builtin", "custom",
 /// or (unset) the build's built-in one when it has one.
 #[tauri::command]
-pub async fn sign_in(app: AppHandle, state: State<'_, AppState>, provider: Option<String>, oauth_app: Option<String>) -> Result<Account> {
+pub async fn sign_in(app: AppHandle, state: State<'_, AppState>, provider: Option<String>, oauth_app: Option<String>, login_hint: Option<String>) -> Result<Account> {
     let provider = if provider.as_deref() == Some("google") { "google" } else { "microsoft" };
     let oauth_app = match oauth_app.as_deref() {
         Some("custom") => crate::state::APP_CUSTOM,
         Some("builtin") => crate::state::APP_BUILTIN,
         _ => state.default_app(provider),
     };
-    let cfg = state.oauth_for_app(provider, oauth_app)?;
+    let mut cfg = state.oauth_for_app(provider, oauth_app)?;
+    // An account another PC uses (settings sync): the sign-in page suggests it.
+    if let Some(hint) = login_hint.as_deref().filter(|h| !h.trim().is_empty()) {
+        cfg = cfg.with_login_hint(hint);
+    }
     // Starting a new sign-in abandons any earlier one still waiting on the browser.
     cancel_pending_sign_in(&state);
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -147,6 +151,7 @@ pub async fn sign_in(app: AppHandle, state: State<'_, AppState>, provider: Optio
         .with(|c| {
             let account = db::upsert_account(c, provider, &email, display_name.as_deref(), &blob)?;
             db::set_account_app(c, account.id, oauth_app)?;
+            crate::sync::accounts::remember(c, provider, &email, oauth_app, display_name.as_deref())?;
             Ok(Account { oauth_app: oauth_app.to_string(), ..account })
         })?;
     state.remember_tokens(account.id, tokens).await;
@@ -200,10 +205,34 @@ pub async fn reconnect_account(app: AppHandle, state: State<'_, AppState>, accou
     Ok(Account { signed_in: true, ..account })
 }
 
+/// Signs an account out of this PC, removing its cached mail. `everywhere` (settings sync)
+/// also takes it off the synced list of accounts, so the other PCs sign it out too; otherwise
+/// this PC just stops offering it.
 #[tauri::command]
-pub async fn sign_out(state: State<'_, AppState>, account_id: i64) -> Result<()> {
+pub async fn sign_out(state: State<'_, AppState>, account_id: i64, everywhere: Option<bool>) -> Result<()> {
+    let account = state.db.with(|c| db::list_accounts(c))?.into_iter().find(|a| a.id == account_id);
+    if let Some(a) = &account {
+        state.db.with(|c| {
+            if everywhere == Some(true) {
+                crate::sync::accounts::forget_everywhere(c, &a.provider, &a.email)
+            } else {
+                crate::sync::accounts::forget_here(c, &a.provider, &a.email)
+            }
+        })?;
+    }
+    remove_account(&state, account_id).await
+}
+
+/// Removes an account and everything kept for it on this PC.
+pub async fn remove_account(state: &AppState, account_id: i64) -> Result<()> {
     state.forget_tokens(account_id).await;
-    state.db.with(|c| db::delete_account(c, account_id))
+    state.db.with(|c| {
+        db::delete_account(c, account_id)?;
+        // Account ids can be reused: a later account mustn't inherit this one's link state.
+        db::delete_setting(c, &crate::sync::store::link_key(account_id))
+    })?;
+    crate::crash::refresh_known(&state.db);
+    Ok(())
 }
 
 #[tauri::command]

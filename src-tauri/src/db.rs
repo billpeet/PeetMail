@@ -27,6 +27,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0015_outbox_ids.sql"),
     include_str!("../migrations/0016_search_cache.sql"),
     include_str!("../migrations/0017_settings_sync.sql"),
+    include_str!("../migrations/0018_account_items.sql"),
 ];
 
 pub struct Db {
@@ -1211,6 +1212,26 @@ mod tests {
         assert!(settings_with_prefix(&c, "snippet:").unwrap().is_empty());
         assert!(settings_with_prefix(&c, "signature:").unwrap().is_empty());
         assert_eq!(get_setting(&c, "layout").unwrap().as_deref(), Some("list"), "other settings are untouched");
+    }
+
+    #[test]
+    fn accounts_already_here_join_the_synced_list_queued_to_go_up() {
+        let mut c = Connection::open_in_memory().unwrap();
+        migrate_to(&mut c, 17).unwrap();
+        c.execute("INSERT INTO accounts (provider, email, display_name, oauth_app) VALUES ('microsoft', 'Boris@Work.example', 'Boris', 'custom')", []).unwrap();
+        c.execute("INSERT INTO accounts (provider, email) VALUES ('google', 'sam@gmail.com')", []).unwrap();
+        migrate(&mut c).unwrap();
+        let items: Vec<(String, serde_json::Value)> = json_settings(&c, "account:");
+        assert_eq!(
+            items,
+            [
+                ("google:sam@gmail.com".to_string(), serde_json::json!({ "app": "builtin", "name": null })),
+                ("microsoft:boris@work.example".to_string(), serde_json::json!({ "app": "custom", "name": "Boris" })),
+            ]
+        );
+        let dirty = crate::sync::store::dirty(&c, 100).unwrap();
+        assert_eq!(dirty.len(), 2);
+        assert!(dirty.iter().all(|d| d.hlc == crate::sync::hlc::ZERO && d.server_seq.is_none()));
     }
 
     #[test]

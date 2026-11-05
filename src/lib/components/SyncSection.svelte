@@ -3,6 +3,7 @@
   // passphrase or create a sync account), and once on, its status, linked accounts, devices,
   // passphrase and turning it off.
   import { settingsSyncApi, type SyncConnected, type SyncDevice, type SyncIdentity } from "#lib/api.js";
+  import { mail } from "#lib/mail.svelte.js";
   import { settingsSync } from "#lib/settingsSync.svelte.js";
   import SettingRow from "./SettingRow.svelte";
   import SettingsCard from "./SettingsCard.svelte";
@@ -142,6 +143,7 @@
     act(async () => {
       await settingsSyncApi.disable();
       devices = identities = [];
+      await mail.refreshElsewhere();
     });
   }
   function deleteAccount() {
@@ -149,6 +151,7 @@
       await settingsSyncApi.deleteAccount();
       confirmDelete = false;
       devices = identities = [];
+      await mail.refreshElsewhere();
     });
   }
 

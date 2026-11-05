@@ -5,6 +5,7 @@
 //! `db::set_setting` refuses (in debug builds) one that is neither, and a test scans the
 //! source for keys, so each new setting gets a deliberate choice.
 
+pub mod accounts;
 pub mod client;
 pub mod commands;
 pub mod crypto;
@@ -28,7 +29,7 @@ const SYNCED: &[&str] = &[
 ];
 
 /// One setting per entry (see `items.rs`).
-const SYNCED_PREFIXES: &[&str] = &["split:", "snippet:", "signature:"];
+const SYNCED_PREFIXES: &[&str] = &["split:", "snippet:", "signature:", "account:"];
 
 const LOCAL: &[&str] = &[
     "cache_days",
@@ -62,7 +63,7 @@ const LOCAL: &[&str] = &[
 ];
 
 /// Per-account bookkeeping. Account ids are this device's own, so these could never sync.
-const LOCAL_PREFIXES: &[&str] = &["gmail_history:", "gmail_snooze_label:", "gmail_all_folders:", "notified_through_id:", "snooze_folder:", "settings_sync_link:"];
+const LOCAL_PREFIXES: &[&str] = &["gmail_history:", "gmail_snooze_label:", "gmail_all_folders:", "notified_through_id:", "snooze_folder:", "settings_sync_link:", "account_dismissed:"];
 
 pub fn scope(key: &str) -> Option<Scope> {
     if SYNCED.contains(&key) || SYNCED_PREFIXES.iter().any(|p| key.starts_with(p)) {

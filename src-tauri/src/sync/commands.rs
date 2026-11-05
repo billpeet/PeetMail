@@ -264,6 +264,18 @@ pub async fn settings_sync_cancel(app: AppHandle, state: State<'_, AppState>) ->
     Ok(())
 }
 
+/// Accounts another PC syncs that this one doesn't have (empty while sync is off).
+#[tauri::command]
+pub fn synced_accounts(state: State<'_, AppState>) -> Result<Vec<super::accounts::Elsewhere>> {
+    state.db.with(|c| if engine::joined(c)?.is_some() { super::accounts::elsewhere(c) } else { Ok(vec![]) })
+}
+
+/// Stops offering an account from another PC here.
+#[tauri::command]
+pub fn dismiss_synced_account(state: State<'_, AppState>, provider: String, email: String) -> Result<()> {
+    state.db.with(|c| super::accounts::forget_here(c, &provider, &email))
+}
+
 #[tauri::command]
 pub async fn settings_sync_now(app: AppHandle, state: State<'_, AppState>) -> Result<Status> {
     engine::run(&app).await;
