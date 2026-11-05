@@ -555,6 +555,13 @@ pub fn has_added_search_mail(conn: &Connection, account_id: i64, conversation_id
         .is_some())
 }
 
+/// A dev copy of the installed app's database: changes still queued for the server belong
+/// to the installed app, which sends them itself. Without this both would send them.
+pub fn forget_pending_work(conn: &Connection) -> Result<()> {
+    conn.execute_batch("DELETE FROM outbox; UPDATE drafts SET dirty = 0;")?;
+    Ok(())
+}
+
 /// Ends a server search: what it added leaves the cache again (snoozed mail stays, its
 /// snooze needs it) and the rest goes back to normal pruning. Returns how many messages went.
 pub fn clear_search_cache(conn: &Connection) -> Result<usize> {
@@ -1266,6 +1273,26 @@ mod tests {
         let backup = Connection::open(tmp.0.join("peetmail.db.v3.bak")).unwrap();
         assert_eq!(backup.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
         assert_eq!(get_setting(&backup, "cache_days").unwrap().as_deref(), Some("before"));
+    }
+
+    #[test]
+    fn a_dev_copy_forgets_work_queued_for_the_server() {
+        let db = Db::open_in_memory().unwrap();
+        db.with(|c| {
+            let a = upsert_account(c, "microsoft", "b@x.com", None, b"t").unwrap().id;
+            crate::outbox::enqueue(c, a, Some("m1"), &crate::outbox::Op::SetRead { value: true }, std::time::Duration::ZERO).unwrap();
+            c.execute("INSERT INTO drafts (account_id, data) VALUES (?1, '{}')", [a]).unwrap();
+            assert_eq!(crate::drafts::unpushed(c).unwrap().len(), 1);
+
+            forget_pending_work(c).unwrap();
+            let queued: i64 = c.query_row("SELECT COUNT(*) FROM outbox", [], |r| r.get(0)).unwrap();
+            assert_eq!(queued, 0);
+            assert!(crate::drafts::unpushed(c).unwrap().is_empty());
+            let drafts: i64 = c.query_row("SELECT COUNT(*) FROM drafts", [], |r| r.get(0)).unwrap();
+            assert_eq!(drafts, 1, "the draft itself stays");
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]

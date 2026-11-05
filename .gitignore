@@ -12,4 +12,6 @@ vite.config.ts.timestamp-*
 # Test harness output
 /test-results
 /.peetmail-test
+# `pnpm tauri dev` data: a copy of the installed app's mail (src-tauri/src/datadir.rs)
+/.peetmail-dev
 /.scratch
