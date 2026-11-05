@@ -75,7 +75,7 @@
     <div data-testid="thread-list-empty" class="grid h-full place-content-center justify-items-center gap-2 text-sm text-ink-500">
       {#if mail.search !== null}No matches.{@render serverSearch()}
       {:else if mail.sync.state === "syncing"}Syncing your mail…
-      {:else}{({ inbox: "Inbox zero.", done: "Nothing archived yet.", sent: "Nothing sent yet.", snoozed: "Nothing snoozed. Press h on a conversation to snooze it.", scheduled: "", drafts: "", all: "No mail.", trash: "Trash is empty." })[mail.mailbox]}
+      {:else}{({ inbox: "Inbox zero.", done: "Nothing archived yet.", sent: "Nothing sent yet.", snoozed: "Nothing snoozed. Press h on a conversation to snooze it.", scheduled: "", drafts: "", all: "No mail.", trash: "Trash is empty.", junk: "No junk." })[mail.mailbox]}
       {/if}
     </div>
   {:else}

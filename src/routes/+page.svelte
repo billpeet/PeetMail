@@ -64,7 +64,7 @@
   };
 
   /** Names of the mailboxes, for the list header. */
-  const MAILBOX_TITLES: Record<MailView, string> = { inbox: "Inbox", done: "Done", sent: "Sent", drafts: "Drafts", snoozed: "Snoozed", scheduled: "Scheduled", all: "All mail", trash: "Trash" };
+  const MAILBOX_TITLES: Record<MailView, string> = { inbox: "Inbox", done: "Done", sent: "Sent", drafts: "Drafts", snoozed: "Snoozed", scheduled: "Scheduled", all: "All mail", trash: "Trash", junk: "Junk" };
 
   let searchInput: HTMLInputElement | undefined = $state();
 
@@ -169,6 +169,7 @@
       { id: "go.sent", keys: "g t", label: "Sent", group: "Go to", when: base, run: () => mail.goTo("sent") },
       { id: "go.all", keys: "g a", label: "All mail", group: "Go to", when: base, run: () => mail.goTo("all") },
       { id: "go.trash", keys: "g #", label: "Trash", group: "Go to", when: base, run: () => mail.goTo("trash") },
+      { id: "go.junk", keys: "g !", label: "Junk (spam)", group: "Go to", when: base, run: () => mail.goTo("junk") },
       { id: "go.snoozed", keys: "g h", label: "Snoozed", group: "Go to", when: base, run: () => mail.goTo("snoozed") },
       { id: "go.scheduled", keys: "g s", label: "Scheduled messages", group: "Go to", when: base, run: () => mail.goTo("scheduled") },
       { id: "go.drafts", keys: "g d", label: "Drafts", group: "Go to", when: base, run: () => mail.goTo("drafts") },
@@ -192,9 +193,10 @@
       // Ctrl chords reach the keymap from text fields too; there Ctrl+A selects the text.
       { id: "select.all", keys: "ctrl+a", label: "Select all in this view", group: "Select", when: () => inList() && !typing(), run: () => mail.checkAll() },
 
-      // In Done and Trash these bring mail back to the inbox (Mail.triageFor).
-      { id: "triage.archive", keys: "e", label: "Archive (in Done: back to Inbox)", group: "Triage", when: hasThread, run: () => mail.triage(mail.triageFor("archive")) },
+      // In Done and Trash these bring mail back to the inbox; in Junk, e is "not spam" (Mail.triageFor).
+      { id: "triage.archive", keys: "e", label: "Archive (in Done: back to Inbox; in Junk: not spam)", group: "Triage", when: hasThread, run: () => mail.triage(mail.triageFor("archive")) },
       { id: "triage.trash", keys: "#", label: "Delete (in Trash: restore)", group: "Triage", when: hasThread, run: () => mail.triage(mail.triageFor("trash")) },
+      { id: "triage.spam", keys: "!", label: "Spam (in Junk: not spam)", group: "Triage", when: hasThread, run: () => mail.triage(mail.triageFor("spam")) },
       { id: "triage.read", keys: "u", label: "Toggle read", group: "Triage", when: () => hasThread() && !inSnoozed(), run: () => mail.toggleRead() },
       { id: "snoozed.wake", keys: "u", label: "Back to inbox now (in Snoozed)", group: "Triage", when: () => hasThread() && inSnoozed(), run: () => mail.unsnooze() },
       { id: "triage.flag", keys: "s", label: "Toggle flag", group: "Triage", when: hasThread, run: () => mail.toggleFlag() },

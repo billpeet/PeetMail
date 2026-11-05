@@ -1,5 +1,5 @@
-// Mailboxes beyond the inbox: Done, Sent, All mail and Trash, from the rail and g keys,
-// and what e and # do in each.
+// Mailboxes beyond the inbox: Done, Sent, All mail, Junk and Trash, from the rail and g keys,
+// and what e, # and ! do in each.
 import { test, expect, folderConversations, row, selectedRow, snap } from "./fixtures";
 import type { Page } from "@playwright/test";
 
@@ -29,6 +29,7 @@ test("g e, g t, g a and g # show Done, Sent, All mail and Trash; g i goes back",
   await goTo(page, "g a", "all");
   for (const c of ["conv-archived", "conv-plain", "conv-sent-0"]) await expect(row(page, c)).toHaveCount(1);
   await expect(row(page, "conv-deleted")).toHaveCount(0);
+  await expect(row(page, "conv-junk")).toHaveCount(0);
 
   await goTo(page, "g #", "trash");
   await expect(page.getByTestId("thread-row")).toHaveCount(1);
@@ -90,6 +91,57 @@ test("# in Done deletes; in Trash, # restores to the inbox", async ({ inbox: pag
   await expect.poll(() => folderOf(fake, "msg-archived"), { timeout: 10_000 }).toBe("AAMkAGI2-inbox");
   expect(await folderConversations(page, "inbox")).toContain("conv-archived");
   expect(await folderConversations(page, "deleteditems")).not.toContain("conv-archived");
+});
+
+test("! marks spam; in Junk, ! (or e) says not spam; z undoes both", async ({ inbox: page, fake }) => {
+  // Junk mail is synced and listed in Junk, and only there.
+  await goTo(page, "g !", "junk");
+  await expect(page.getByTestId("thread-row")).toHaveCount(1);
+  await expect(row(page, "conv-junk")).toBeVisible();
+  await page.keyboard.press("Enter");
+  await expect(page.getByTestId("message")).toHaveCount(1); // the reader shows junk mail here
+  await expect(page.getByTestId("reader-spam")).toHaveAttribute("title", "Not spam (!)");
+  await expect(page.getByTestId("reader-archive")).toHaveAttribute("title", "Move to Inbox (E)");
+  await page.keyboard.press("Escape");
+
+  // !: not spam, back to the inbox.
+  await page.keyboard.press("!");
+  await expect(page.getByTestId("toast")).toContainText("Not spam: moved to Inbox");
+  await expect(page.getByTestId("thread-list-empty")).toHaveText("No junk.");
+  await expect.poll(() => folderOf(fake, "msg-junk"), { timeout: 10_000 }).toBe("AAMkAGI2-inbox");
+  await page.keyboard.press("z");
+  await expect(row(page, "conv-junk")).toBeVisible();
+  await expect.poll(() => folderOf(fake, "msg-junk"), { timeout: 10_000 }).toBe("AAMkAGI2-junk");
+
+  // e in Junk is not spam too.
+  await page.keyboard.press("e");
+  await expect(row(page, "conv-junk")).toHaveCount(0);
+  await expect.poll(() => folderOf(fake, "msg-junk"), { timeout: 10_000 }).toBe("AAMkAGI2-inbox");
+
+  // ! in the inbox: spam, out of the inbox and into Junk.
+  await page.keyboard.press("g");
+  await page.keyboard.press("i");
+  await expect(page.getByTestId("splits")).toBeVisible();
+  await row(page, "conv-plain").click();
+  await expect(page.getByTestId("reader-spam")).toHaveAttribute("title", "Spam (!)");
+  await page.keyboard.press("!");
+  await expect(page.getByTestId("toast")).toContainText("Marked as spam");
+  await page.keyboard.press("Escape");
+  await expect(row(page, "conv-plain")).toHaveCount(0);
+  await expect.poll(() => folderOf(fake, "msg-plain"), { timeout: 10_000 }).toBe("AAMkAGI2-junk");
+  expect(await folderConversations(page, "junkemail")).toContain("conv-plain");
+  await page.keyboard.press("z");
+  await expect(row(page, "conv-plain")).toBeVisible();
+  await expect.poll(() => folderOf(fake, "msg-plain"), { timeout: 10_000 }).toBe("AAMkAGI2-inbox");
+});
+
+test("mail the server files as junk leaves the inbox for Junk at the next sync", async ({ inbox: page, fake }) => {
+  await expect(row(page, "conv-plain")).toBeVisible();
+  await fake.control("move", { id: "msg-plain", folder: "junkemail" });
+  await page.keyboard.press("Control+r");
+  await expect(row(page, "conv-plain")).toHaveCount(0, { timeout: 15_000 });
+  await page.getByTestId("rail-mailbox-junk").click();
+  await expect(row(page, "conv-plain")).toBeVisible();
 });
 
 test("a key pressed while a mailbox loads never acts on the one you left", async ({ inbox: page, fake }) => {

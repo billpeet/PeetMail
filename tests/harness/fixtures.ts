@@ -10,6 +10,7 @@ export const FOLDER_IDS = {
   sentitems: "AAMkAGI2-sent",
   archive: "AAMkAGI2-archive",
   deleteditems: "AAMkAGI2-deleted",
+  junkemail: "AAMkAGI2-junk",
 } as const;
 export type FolderName = keyof typeof FOLDER_IDS;
 
@@ -198,6 +199,11 @@ export function defaultMailbox({ now = Date.now(), count = 160, seed = 42 }: { n
   messages.push(makeMessage({
     id: "msg-deleted", conversationId: "conv-deleted", sender: SENDERS[3], subject: "Last chance: webinar seats",
     receivedAt: now - 28 * HOUR, isRead: true, folder: "deleteditems", snippet: "Only a few seats left.",
+  }));
+  // Caught by the junk filter: one real (for Not spam), for the Junk view.
+  messages.push(makeMessage({
+    id: "msg-junk", conversationId: "conv-junk", sender: SENDERS[5], subject: "Your contract renewal",
+    receivedAt: now - 27 * HOUR, isRead: false, folder: "junkemail", snippet: "Caught by the filter, but it's real.",
   }));
   // Inline image (cid:) plus a regular attachment.
   const attach = makeMessage({

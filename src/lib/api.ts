@@ -78,15 +78,18 @@ export type MessageRow = {
   meetingMessageType: string | null;
 };
 
-/** `moveToInbox`: archived or deleted mail back to the inbox (e in Done, # in Trash). */
-export type Action = "archive" | "trash" | "moveToInbox" | "markRead" | "markUnread" | "flag" | "unflag";
+/**
+ * `moveToInbox`: archived or deleted mail back to the inbox (e in Done, # in Trash).
+ * `spam`: to Junk (Gmail: report spam); `notSpam`: from Junk back to the inbox.
+ */
+export type Action = "archive" | "trash" | "moveToInbox" | "spam" | "notSpam" | "markRead" | "markUnread" | "flag" | "unflag";
 export type ActionOutcome = { label: string | null; changed: number };
 /** A conversation, as the batch commands take it. */
 export type ThreadRef = { accountId: number; conversationId: string };
 export type DraftKind = "new" | "reply" | "replyAll" | "forward";
 
 /** The mail views the sidebar lists, each across signed-in accounts. */
-export type Mailbox = "inbox" | "done" | "sent" | "snoozed" | "all" | "trash";
+export type Mailbox = "inbox" | "done" | "sent" | "snoozed" | "all" | "trash" | "junk";
 export type SendInput = {
   accountId: number;
   kind: DraftKind;
@@ -289,9 +292,9 @@ export const api = {
     invoke<boolean>("fetch_search_conversation", { accountId, conversationId }),
   /** Closes the server search: mail it fetched leaves the cache again. */
   clearServerSearch: () => invoke<void>("clear_server_search"),
-  /** `withTrash`: include messages in Deleted Items (the Trash view). */
-  getThread: (accountId: number, conversationId: string, withTrash = false) =>
-    invoke<MessageRow[]>("get_thread", { accountId, conversationId, withTrash }),
+  /** `from`: the view it's opened from. Messages in Deleted Items and Junk only show from Trash and Junk. */
+  getThread: (accountId: number, conversationId: string, from: Mailbox | null = null) =>
+    invoke<MessageRow[]>("get_thread", { accountId, conversationId, from }),
   getMessageBody: (messageId: number) => invoke<string>("get_message_body", { messageId }),
   syncNow: () => invoke<void>("sync_now"),
   setCacheLimits: (limits: CacheLimits) => invoke<void>("set_cache_limits", { limits }),

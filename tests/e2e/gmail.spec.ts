@@ -88,7 +88,7 @@ test("later syncs follow Gmail's history: new mail, read elsewhere, archived els
   await expect(row(page, "g-thread-photos")).toHaveCount(0);
   await expect(row(page, "g-thread-latin")).toHaveCount(0);
   // Only metadata for what changed, not a full relist.
-  expect(gmail.state.requests.filter((r) => r.path.endsWith("/messages") && r.method === "GET").length).toBe(3); // the first sync's lists
+  expect(gmail.state.requests.filter((r) => r.path.endsWith("/messages") && r.method === "GET").length).toBe(4); // the first sync's lists (inbox, sent, archive and trash, spam)
   expect(await folderConversations(page, "archive", GMAIL_ACCOUNT.email)).toContain("g-thread-photos"); // archived on the phone: Done
 
   // History too old: start over, and pick up what changed.
@@ -98,19 +98,54 @@ test("later syncs follow Gmail's history: new mail, read elsewhere, archived els
   await expect(page.locator("[data-testid=thread-row]", { hasText: "After the gap" })).toBeVisible();
 });
 
-test("archived and trashed Gmail mail in the window is kept; spam and old mail aren't", async ({ inbox: page, gmail }) => {
+test("archived, trashed and spam Gmail mail in the window is kept; old mail isn't", async ({ inbox: page, gmail }) => {
   await addGmail(page);
   const email = GMAIL_ACCOUNT.email;
   await expect.poll(() => folderConversations(page, "archive", email)).toEqual(["g-thread-old-archived"]);
   expect(await folderConversations(page, "deleteditems", email)).toEqual(["g-thread-trashed"]);
-  const everywhere = (await Promise.all(["inbox", "sentitems", "archive", "deleteditems"].map((r) => folderConversations(page, r, email)))).flat();
-  expect(everywhere).not.toContain("g-thread-spam");
+  expect(await folderConversations(page, "junkemail", email)).toEqual(["g-thread-spam"]);
+  const everywhere = (await Promise.all(["inbox", "sentitems", "archive", "deleteditems", "junkemail"].map((r) => folderConversations(page, r, email)))).flat();
   expect(everywhere).not.toContain("g-thread-ancient");
 
   // Mail that arrives already archived (a filter skipping the inbox) lands in Done, not nowhere.
   await gmail.control("deliver", { id: "g-filtered", threadId: "g-thread-filtered", labelIds: ["CATEGORY_UPDATES"], subject: "Receipt" });
   await syncGmail(page, gmail);
   expect(await folderConversations(page, "archive", email)).toContain("g-thread-filtered");
+});
+
+test("spam is Gmail's SPAM label: report, not spam, and undoing a delete from Junk", async ({ inbox: page, gmail }) => {
+  await addGmail(page);
+  // Not spam: SPAM off, INBOX on.
+  await page.keyboard.press("g");
+  await page.keyboard.press("!");
+  await expect(row(page, "g-thread-spam")).toBeVisible();
+  await row(page, "g-thread-spam").click();
+  await page.keyboard.press("!");
+  await expect(row(page, "g-thread-spam")).toHaveCount(0);
+  await expect.poll(() => labelsOf(gmail, "g-11"), { timeout: 10_000 }).toContain("INBOX");
+  expect(await labelsOf(gmail, "g-11")).not.toContain("SPAM");
+
+  // Report spam from the inbox: SPAM on, INBOX off; it shows in Junk.
+  await page.keyboard.press("g");
+  await page.keyboard.press("i");
+  await selectWithKeys(page, "g-thread-latin");
+  await page.keyboard.press("!");
+  await expect(row(page, "g-thread-latin")).toHaveCount(0);
+  await expect.poll(() => labelsOf(gmail, "g-5"), { timeout: 10_000 }).toContain("SPAM");
+  expect(await labelsOf(gmail, "g-5")).not.toContain("INBOX");
+  await syncGmail(page, gmail);
+  await page.keyboard.press("g");
+  await page.keyboard.press("!");
+  await expect(row(page, "g-thread-latin")).toBeVisible();
+
+  // # in Junk deletes; undoing once it reached Gmail puts it back in Spam, not the inbox.
+  await row(page, "g-thread-latin").click();
+  await page.keyboard.press("#");
+  await expect.poll(() => labelsOf(gmail, "g-5"), { timeout: 10_000 }).toContain("TRASH");
+  await page.keyboard.press("z");
+  await expect.poll(() => labelsOf(gmail, "g-5"), { timeout: 10_000 }).not.toContain("TRASH");
+  expect(await labelsOf(gmail, "g-5")).toContain("SPAM");
+  expect(await labelsOf(gmail, "g-5")).not.toContain("INBOX");
 });
 
 test("Done and Trash are label changes too: back to the inbox, restore, and undoing a delete from Done", async ({ inbox: page, gmail }) => {

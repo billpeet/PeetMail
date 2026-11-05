@@ -62,7 +62,7 @@ const LOCAL: &[&str] = &[
 ];
 
 /// Per-account bookkeeping. Account ids are this device's own, so these could never sync.
-const LOCAL_PREFIXES: &[&str] = &["gmail_history:", "gmail_snooze_label:", "gmail_all_folders:", "notified_through_id:", "snooze_folder:", "settings_sync_link:"];
+const LOCAL_PREFIXES: &[&str] = &["gmail_history:", "gmail_snooze_label:", "gmail_all_folders:", "gmail_spam:", "notified_through_id:", "snooze_folder:", "settings_sync_link:"];
 
 pub fn scope(key: &str) -> Option<Scope> {
     if SYNCED.contains(&key) || SYNCED_PREFIXES.iter().any(|p| key.starts_with(p)) {

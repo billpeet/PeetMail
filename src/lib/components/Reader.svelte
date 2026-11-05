@@ -6,7 +6,7 @@
   import Attachments from "./Attachments.svelte";
   import InviteCard from "./InviteCard.svelte";
   import Composer from "./Composer.svelte";
-  import { Archive, ArchiveRestore, ArrowLeft, ChevronDown, ChevronUp, Flag, Forward, Inbox, Mail, Maximize2, Reply, ReplyAll, Trash2 } from "@lucide/svelte";
+  import { Archive, ArchiveRestore, ArrowLeft, ChevronDown, ChevronUp, Flag, Forward, Inbox, Mail, Maximize2, Reply, ReplyAll, ShieldAlert, ShieldCheck, Trash2 } from "@lucide/svelte";
 
   /** Shown as the reading pane beside the list (preview layout), not full width. */
   const inPane = $derived(mail.previewing && mail.view === "list");
@@ -14,9 +14,12 @@
   const flagged = $derived(mail.current?.isFlagged ?? false);
   /** The reply or forward drafted for this conversation, if any. */
   const threadDraft = $derived(mail.current && mail.threadFor ? mail.draftFor(mail.current.accountId, mail.threadFor) : undefined);
-  // In Done, e brings the conversation back to the inbox; in Trash, e and # restore it.
-  const archiveBack = $derived(mail.triageFor("archive") === "moveToInbox");
+  // In Done, e brings the conversation back to the inbox; in Trash, e and # restore it;
+  // in Junk, e and ! mean "not spam".
+  const archiveAction = $derived(mail.triageFor("archive"));
+  const archiveBack = $derived(archiveAction !== "archive");
   const trashBack = $derived(mail.triageFor("trash") === "moveToInbox");
+  const notSpam = $derived(mail.triageFor("spam") === "notSpam");
 
   /** Label for meeting messages: invitations, updates, and how people answered. */
   function meetingLabel(m: MessageRow): { text: string; tone: string } | null {
@@ -85,7 +88,7 @@
     {/if}
     <span class="mx-1 h-5 w-px bg-ink-700"></span>
     {#if archiveBack}
-      {@render action("reader-archive", "Move to Inbox (E)", () => mail.act("moveToInbox"), Inbox)}
+      {@render action("reader-archive", "Move to Inbox (E)", () => mail.act(archiveAction), Inbox)}
     {:else}
       {@render action("reader-archive", "Archive (E)", () => mail.act("archive"), Archive)}
     {/if}
@@ -93,6 +96,11 @@
       {@render action("reader-trash", "Restore to Inbox (#)", () => mail.act("moveToInbox"), ArchiveRestore)}
     {:else}
       {@render action("reader-trash", "Delete (#)", () => mail.act("trash"), Trash2)}
+    {/if}
+    {#if notSpam}
+      {@render action("reader-spam", "Not spam (!)", () => mail.act("notSpam"), ShieldCheck)}
+    {:else}
+      {@render action("reader-spam", "Spam (!)", () => mail.act("spam"), ShieldAlert)}
     {/if}
     {@render action("reader-unread", "Mark as unread (U)", () => mail.act("markUnread"), Mail)}
     {@render action("reader-flag", flagged ? "Unflag (S)" : "Flag (S)", () => mail.toggleFlag(), Flag, flagged ? "text-amber-400" : "")}
