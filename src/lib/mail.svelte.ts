@@ -46,6 +46,9 @@ export type Overlay = null | "help" | "settings" | "palette" | "event" | "quicka
 /** What the mail list shows: a mailbox, or messages scheduled to send. */
 export type MailView = Mailbox | "scheduled" | "drafts";
 
+/** Actions that take a conversation out of the list it's in. */
+const REMOVALS: Action[] = ["archive", "trash", "moveToInbox", "spam", "notSpam"];
+
 /** The pages of Settings, in sidebar order. */
 export type SettingsPage = "accounts" | "mail" | "calendar" | "notifications" | "storage" | "updates" | "privacy" | "apps";
 
@@ -478,16 +481,23 @@ class MailStore {
     return out;
   }
 
-  /** Conversations opened from Trash show their deleted messages; elsewhere those stay hidden. */
-  get #withTrash(): boolean {
-    return this.mailbox === "trash" && this.search === null;
+  /**
+   * The view conversations are opened from, for the reader: from Trash and Junk they show
+   * their deleted or junk messages; elsewhere those stay hidden.
+   */
+  get #openedFrom(): Mailbox | null {
+    return this.search === null && (this.mailbox === "trash" || this.mailbox === "junk") ? this.mailbox : null;
   }
 
-  /** What `e` and `#` do here: in Done and Trash they bring mail back to the inbox. */
-  triageFor(action: "archive" | "trash"): Action {
+  /**
+   * What `e`, `#` and `!` do here: in Done and Trash `e` and `#` bring mail back to the
+   * inbox; in Junk `e` and `!` mean "not spam".
+   */
+  triageFor(action: "archive" | "trash" | "spam"): Action {
     if (this.search !== null) return action;
+    if (this.mailbox === "junk") return action === "trash" ? "trash" : "notSpam";
     if (this.mailbox === "done" && action === "archive") return "moveToInbox";
-    if (this.mailbox === "trash") return "moveToInbox";
+    if (this.mailbox === "trash" && action !== "spam") return "moveToInbox";
     return action;
   }
 
@@ -608,7 +618,7 @@ class MailStore {
         this.threadFor = null;
         this.invite = null;
       } else {
-        const thread = await api.getThread(cur.accountId, cur.conversationId, this.#withTrash);
+        const thread = await api.getThread(cur.accountId, cur.conversationId, this.#openedFrom);
         if (seq !== this.#listSeq) return;
         this.thread = thread;
         this.threadFor = cur.conversationId;
@@ -698,7 +708,7 @@ class MailStore {
   async #actOnBatch(rows: ThreadRow[], action: Action) {
     try {
       const out = await api.threadsAction(rows.map(ref), action);
-      const removal = action === "archive" || action === "trash" || action === "moveToInbox";
+      const removal = REMOVALS.includes(action);
       // Those leave the list; read and flag keep the selection, so u then e works.
       if (removal) this.checked = new Set();
       this.showToast(out.label ? { text: out.label, undo: true } : { text: "Nothing to change" });
@@ -737,7 +747,7 @@ class MailStore {
     if (t.draftId !== undefined) return this.#openDraftRow(t.draftId);
     const nav = this.#navSeq;
     // Load the thread first (a local query) so the reader never flashes empty or stale.
-    const rows = await api.getThread(t.accountId, t.conversationId, this.#withTrash);
+    const rows = await api.getThread(t.accountId, t.conversationId, this.#openedFrom);
     if (this.current?.conversationId !== t.conversationId) return;
     // Esc (back to the list) while it loaded wins: don't reopen the reader behind it.
     if (nav !== this.#navSeq) return;
@@ -773,7 +783,7 @@ class MailStore {
       this.invite = null;
       return;
     }
-    const rows = await api.getThread(t.accountId, t.conversationId, this.#withTrash);
+    const rows = await api.getThread(t.accountId, t.conversationId, this.#openedFrom);
     if (this.current?.conversationId !== t.conversationId) return;
     this.thread = rows;
     this.threadFor = t.conversationId;
@@ -934,7 +944,7 @@ class MailStore {
     try {
       if (!(await api.fetchSearchConversation(t.accountId, t.conversationId))) return;
       if (this.threadFor !== t.conversationId || this.current?.accountId !== t.accountId) return;
-      this.thread = await api.getThread(t.accountId, t.conversationId, this.#withTrash);
+      this.thread = await api.getThread(t.accountId, t.conversationId, this.#openedFrom);
     } catch {
       // Offline or the server said no: the messages found still show; try again next open.
       this.#fetchedConversations.delete(key);
@@ -956,7 +966,7 @@ class MailStore {
       if (out.label && !quiet) this.showToast({ text: out.label, undo: undoable });
       // mail-changed triggers the refresh; do it now too so the list never lags a keypress.
       await this.refresh();
-      if (action === "archive" || action === "trash" || action === "moveToInbox") await this.#afterRemoval();
+      if (REMOVALS.includes(action)) await this.#afterRemoval();
     } catch (e) {
       this.showToast({ text: String(e), error: true });
     }
@@ -1250,7 +1260,7 @@ class MailStore {
     if (open && this.composerInline && family(open.kind) === family(kind)) return this.focusComposer();
     const existing = this.draftFor(t.accountId, t.conversationId);
     if (existing && family(existing.draft.kind) === family(kind)) return this.openDraft(existing);
-    const msgs = this.threadFor === t.conversationId ? this.thread : await api.getThread(t.accountId, t.conversationId, this.#withTrash);
+    const msgs = this.threadFor === t.conversationId ? this.thread : await api.getThread(t.accountId, t.conversationId, this.#openedFrom);
     // Reply to the newest message someone else sent, if there is one.
     const me = account.email.toLowerCase();
     const ref = [...msgs].reverse().find((m) => m.fromAddress?.toLowerCase() !== me) ?? msgs.at(-1);

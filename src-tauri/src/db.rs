@@ -591,7 +591,7 @@ pub enum Scope {
     /// Archived conversations with nothing left in the inbox or snoozed: a reply that lands
     /// in an archived conversation takes it out of Done and back to the inbox.
     Done,
-    /// Every signed-in account's cached folders except Deleted Items (search, All mail).
+    /// Every signed-in account's cached folders except Deleted Items and Junk (search, All mail).
     AllMail,
 }
 
@@ -605,6 +605,7 @@ pub enum Mailbox {
     Snoozed,
     All,
     Trash,
+    Junk,
 }
 
 impl Mailbox {
@@ -616,9 +617,26 @@ impl Mailbox {
             Mailbox::Snoozed => Scope::Role(crate::actions::SNOOZED_ROLE),
             Mailbox::All => Scope::AllMail,
             Mailbox::Trash => Scope::Role("deleteditems"),
+            Mailbox::Junk => Scope::Role(JUNK_ROLE),
+        }
+    }
+
+    /// The folder this view shows that other views keep out of conversations, if any.
+    fn hidden_role(self) -> Option<&'static str> {
+        match self {
+            Mailbox::Trash => Some("deleteditems"),
+            Mailbox::Junk => Some(JUNK_ROLE),
+            _ => None,
         }
     }
 }
+
+/// Junk Email (Graph's well-known name; Gmail's SPAM label maps to it).
+pub const JUNK_ROLE: &str = "junkemail";
+
+/// Folders whose mail stays out of conversations, All mail, search and Recent Opens,
+/// as SQL over `f` (folders). Only their own view (Trash, Junk) shows them.
+const HIDDEN_ROLES: &str = "COALESCE(f.role, '') IN ('deleteditems', 'junkemail')";
 
 /// Signed-in accounts' folders with this role, as SQL over `?` (the role).
 const ROLE_FOLDERS: &str = "SELECT f.id FROM folders f JOIN accounts a ON a.id = f.account_id
@@ -646,9 +664,10 @@ impl Scope {
                     crate::actions::SNOOZED_ROLE
                 )
             }
-            Scope::AllMail => "m.folder_id NOT IN (SELECT id FROM folders WHERE role = 'deleteditems')
-                               AND m.account_id IN (SELECT id FROM accounts WHERE token_blob IS NOT NULL)"
-                .to_string(),
+            Scope::AllMail => format!(
+                "m.folder_id NOT IN (SELECT f.id FROM folders f WHERE {HIDDEN_ROLES})
+                 AND m.account_id IN (SELECT id FROM accounts WHERE token_blob IS NOT NULL)"
+            ),
         }
     }
 }
@@ -731,16 +750,18 @@ pub fn count_threads(conn: &Connection, scope: Scope, filter: &crate::query::Fil
 }
 
 /// Every message of a conversation, oldest first. Includes Sent and Archive copies so the
-/// reader shows the whole exchange; Deleted Items only with `with_trash` (the Trash view).
-pub fn get_thread(conn: &Connection, account_id: i64, conversation_id: &str, with_trash: bool) -> Result<Vec<MessageRow>> {
-    let mut stmt = conn.prepare_cached(
+/// reader shows the whole exchange; Deleted Items and Junk only when opened from their own
+/// view (`from`: Trash, Junk).
+pub fn get_thread(conn: &Connection, account_id: i64, conversation_id: &str, from: Option<Mailbox>) -> Result<Vec<MessageRow>> {
+    let mut stmt = conn.prepare_cached(&format!(
         "SELECT m.id, m.subject, m.from_name, m.from_address, m.to_json, m.cc_json, m.received_at, m.preview,
                 m.is_read, m.has_attachments, m.is_flagged, COALESCE(f.role, ''), m.message_type, m.meeting_message_type
          FROM messages m JOIN folders f ON f.id = m.folder_id
-         WHERE m.account_id = ?1 AND m.conversation_id = ?2 AND (?3 OR COALESCE(f.role, '') <> 'deleteditems')
-         ORDER BY m.received_at ASC, m.id ASC",
-    )?;
-    let rows = stmt.query_map(params![account_id, conversation_id, with_trash], |r| {
+         WHERE m.account_id = ?1 AND m.conversation_id = ?2 AND (f.role IS ?3 OR NOT {HIDDEN_ROLES})
+         ORDER BY m.received_at ASC, m.id ASC"
+    ))?;
+    let shown = from.and_then(Mailbox::hidden_role);
+    let rows = stmt.query_map(params![account_id, conversation_id, shown], |r| {
         let to: String = r.get(4)?;
         let cc: String = r.get(5)?;
         Ok(MessageRow {
@@ -869,16 +890,16 @@ pub fn record_open(conn: &Connection, account_id: i64, conversation_id: &str) ->
 }
 
 /// Recently opened conversations, newest open first, each with its newest message
-/// (any folder except Deleted Items, so archived ones still show).
+/// (any folder except Deleted Items and Junk, so archived ones still show).
 pub fn recent_opens(conn: &Connection, limit: i64) -> Result<Vec<RecentOpen>> {
-    let mut stmt = conn.prepare_cached(
+    let mut stmt = conn.prepare_cached(&format!(
         "WITH latest AS (
            SELECT m.*,
                   ROW_NUMBER()     OVER w AS rn,
                   COUNT(*)         OVER c AS cnt,
                   SUM(1 - is_read) OVER c AS unread
            FROM messages m JOIN folders f ON f.id = m.folder_id
-           WHERE COALESCE(f.role, '') <> 'deleteditems'
+           WHERE NOT {HIDDEN_ROLES}
              AND (m.account_id, m.conversation_id) IN (SELECT account_id, conversation_id FROM recent_opens)
            WINDOW c AS (PARTITION BY m.account_id, m.conversation_id),
                   w AS (PARTITION BY m.account_id, m.conversation_id ORDER BY m.received_at DESC, m.id DESC)
@@ -888,8 +909,8 @@ pub fn recent_opens(conn: &Connection, limit: i64) -> Result<Vec<RecentOpen>> {
          FROM recent_opens r
          JOIN latest l ON l.account_id = r.account_id AND l.conversation_id = r.conversation_id AND l.rn = 1
          ORDER BY r.opened_at DESC
-         LIMIT ?1",
-    )?;
+         LIMIT ?1"
+    ))?;
     let rows = stmt.query_map([limit], |r| {
         Ok(RecentOpen {
             thread: ThreadRow {
@@ -923,12 +944,15 @@ pub struct Contact {
     pub address: String,
 }
 
-/// People you've exchanged mail with, best match first: senders plus recipients of mail you sent.
+/// People you've exchanged mail with, best match first: senders (not of junk) plus
+/// recipients of mail you sent.
 pub fn suggest_contacts(conn: &Connection, prefix: &str, limit: i64) -> Result<Vec<Contact>> {
     let like = format!("%{}%", prefix.to_lowercase());
     let mut stmt = conn.prepare_cached(
         "WITH people AS (
-           SELECT from_name AS name, lower(from_address) AS address FROM messages WHERE from_address IS NOT NULL
+           SELECT m.from_name AS name, lower(m.from_address) AS address
+           FROM messages m JOIN folders f ON f.id = m.folder_id
+           WHERE m.from_address IS NOT NULL AND COALESCE(f.role, '') <> 'junkemail'
            UNION ALL
            SELECT json_extract(j.value, '$.name'), lower(json_extract(j.value, '$.address'))
            FROM messages m JOIN folders f ON f.id = m.folder_id, json_each(m.to_json) j
@@ -1349,7 +1373,7 @@ mod tests {
             let convs: Vec<&str> = rows.iter().map(|t| t.conversation_id.as_str()).collect();
             assert_eq!(convs, ["c1", "c2"]);
             assert_eq!(rows[1].message_count, 1, "m3 is in c2's conversation but not a hit");
-            assert_eq!(get_thread(c, a, "c2", false)?.len(), 2, "the reader shows the whole conversation");
+            assert_eq!(get_thread(c, a, "c2", None)?.len(), 2, "the reader shows the whole conversation");
 
             // Closing the search drops what it added and keeps what was cached.
             assert_eq!(clear_search_cache(c)?, 2);
@@ -1463,7 +1487,7 @@ mod tests {
         db.with(|c| {
             upsert_message(c, a, f, &msg("m1", "c1", "2026-10-01T10:00:00Z", false))?;
             upsert_message(c, a, f, &MessageUpsert { remote_id: "m1".into(), is_read: Some(true), ..Default::default() })?;
-            let t = get_thread(c, a, "c1", false)?;
+            let t = get_thread(c, a, "c1", None)?;
             assert_eq!(t.len(), 1);
             assert!(t[0].is_read);
             assert_eq!(t[0].subject, "subject m1");
@@ -1594,7 +1618,9 @@ mod tests {
             let folder = |acct, role: &str| ensure_local_folder(c, acct, role, role).map(|f| f.id);
             let (sent, archive, archive_b) = (folder(a, "sentitems")?, folder(a, "archive")?, folder(b, "archive")?);
             let deleted = folder(b, "deleteditems")?;
+            let junk = folder(a, JUNK_ROLE)?;
             upsert_message(c, a, inbox, &msg("i1", "c-inbox", "2026-10-05T10:00:00Z", false))?;
+            upsert_message(c, a, junk, &msg("j1", "c-junk", "2026-10-01T08:00:00Z", false))?;
             upsert_message(c, a, sent, &msg("s1", "c-sent", "2026-10-04T10:00:00Z", true))?;
             upsert_message(c, a, archive, &msg("a1", "c-done", "2026-10-03T10:00:00Z", true))?;
             upsert_message(c, b, archive_b, &msg("a2", "c-done-b", "2026-10-02T10:00:00Z", true))?;
@@ -1609,17 +1635,46 @@ mod tests {
             assert_eq!(convs(Mailbox::Sent), ["c-sent"]);
             assert_eq!(convs(Mailbox::Done), ["c-done", "c-done-b"]);
             assert_eq!(convs(Mailbox::Trash), ["c-trash"]);
+            assert_eq!(convs(Mailbox::Junk), ["c-junk"]);
+            // Junk stays out of All mail (and so search), like Trash.
             assert_eq!(convs(Mailbox::All), ["c-inbox", "c-sent", "c-done", "c-done-b"]);
 
             // The Trash view's reader shows the deleted message; elsewhere it's hidden.
-            assert!(get_thread(c, b, "c-trash", false)?.is_empty());
-            assert_eq!(get_thread(c, b, "c-trash", true)?.len(), 1);
+            assert!(get_thread(c, b, "c-trash", None)?.is_empty());
+            assert_eq!(get_thread(c, b, "c-trash", Some(Mailbox::Trash))?.len(), 1);
+            assert!(get_thread(c, b, "c-trash", Some(Mailbox::Junk))?.is_empty());
+            // Likewise junk, only from the Junk view.
+            assert!(get_thread(c, a, "c-junk", None)?.is_empty());
+            assert!(get_thread(c, a, "c-junk", Some(Mailbox::Inbox))?.is_empty());
+            assert_eq!(get_thread(c, a, "c-junk", Some(Mailbox::Junk))?.len(), 1);
 
             // A signed-out account's mail leaves every mailbox.
             c.execute("UPDATE accounts SET token_blob = NULL WHERE id = ?1", [b])?;
             assert_eq!(convs(Mailbox::Done), ["c-done"]);
             assert!(convs(Mailbox::Trash).is_empty());
             assert_eq!(convs(Mailbox::All), ["c-inbox", "c-sent", "c-done"]);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn junk_senders_are_not_suggested_as_contacts() {
+        let (db, a, inbox) = seed();
+        db.with(|c| {
+            let junk = ensure_local_folder(c, a, JUNK_ROLE, "Junk Email")?.id;
+            let from = |id: &str, address: &str| MessageUpsert {
+                from_name: Some(address.into()),
+                from_address: Some(address.into()),
+                ..msg(id, id, "2026-10-01T10:00:00Z", true)
+            };
+            upsert_message(c, a, inbox, &from("i1", "sam@contoso.com"))?;
+            for i in 0..3 {
+                upsert_message(c, a, junk, &from(&format!("j{i}"), "sales@scam.example"))?;
+            }
+            let found = |p: &str| suggest_contacts(c, p, 8).unwrap().into_iter().map(|x| x.address).collect::<Vec<_>>();
+            assert_eq!(found("sam"), ["sam@contoso.com"]);
+            assert!(found("scam").is_empty());
             Ok(())
         })
         .unwrap();
