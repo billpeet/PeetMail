@@ -1,6 +1,16 @@
-//! Which settings follow you between devices (docs/SYNC.md). Every settings key is either
-//! synced or local; `db::set_setting` refuses (in debug builds) one that is neither, and a test
-//! scans the source for keys, so each new setting gets a deliberate choice.
+//! Settings sync (docs/SYNC.md): settings that follow you between devices through a
+//! self-hosted server, end-to-end encrypted.
+//!
+//! This file says which settings sync. Every settings key is either synced or local;
+//! `db::set_setting` refuses (in debug builds) one that is neither, and a test scans the
+//! source for keys, so each new setting gets a deliberate choice.
+
+pub mod client;
+pub mod commands;
+pub mod crypto;
+pub mod engine;
+pub mod hlc;
+pub mod store;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
@@ -11,9 +21,6 @@ pub enum Scope {
 }
 
 const SYNCED: &[&str] = &[
-    "ms_client_id",
-    "google_client_id",
-    "google_client_secret",
     "hide_empty_splits",
     "week_starts_on",
     "undo_send_secs",
@@ -40,10 +47,20 @@ const LOCAL: &[&str] = &[
     "update_channel",
     "restarted_to_update",
     "fake_autostart",
+    // Changing the user's own OAuth app signs out the accounts that use it, so a change made
+    // on one device mustn't arrive on another unannounced. Local until that's handled.
+    "ms_client_id",
+    "google_client_id",
+    "google_client_secret",
+    // Settings sync's own state (store.rs).
+    "settings_sync_node",
+    "settings_sync_server",
+    "settings_sync_cursor",
+    "settings_sync_secret",
 ];
 
 /// Per-account bookkeeping. Account ids are this device's own, so these could never sync.
-const LOCAL_PREFIXES: &[&str] = &["gmail_history:", "gmail_snooze_label:", "gmail_all_folders:", "notified_through_id:", "snooze_folder:"];
+const LOCAL_PREFIXES: &[&str] = &["gmail_history:", "gmail_snooze_label:", "gmail_all_folders:", "notified_through_id:", "snooze_folder:", "settings_sync_link:"];
 
 pub fn scope(key: &str) -> Option<Scope> {
     if SYNCED.contains(&key) || SYNCED_PREFIXES.iter().any(|p| key.starts_with(p)) {
@@ -86,13 +103,22 @@ mod tests {
         let constant = regex::Regex::new(r#"const KEY_[A-Z_]+: &str = "([^"]+)""#).unwrap();
         let literal = regex::Regex::new(r#"(?:get|set|delete)_setting\(\s*[&\w]+,\s*"([^"]+)""#).unwrap();
         let built = regex::Regex::new(r#"format!\("([a-z_]+:)\{"#).unwrap();
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut found = Vec::new();
-        for entry in std::fs::read_dir(&dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().is_none_or(|e| e != "rs") || path.file_name().is_some_and(|n| n == "sync.rs") {
-                continue;
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let this = src.join("sync").join("mod.rs");
+        let mut files = Vec::new();
+        let mut dirs = vec![src];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") && path != this {
+                    files.push(path);
+                }
             }
+        }
+        let mut found = Vec::new();
+        for path in files {
             let text = std::fs::read_to_string(&path).unwrap();
             // Test modules (at the end of each file) use made-up and retired keys on purpose;
             // set_setting's debug assertion still checks what they write.
@@ -120,7 +146,7 @@ mod tests {
             } else {
                 scope(&key).is_some()
             };
-            assert!(ok, "setting {key:?} in {} isn't classified in sync.rs", path.display());
+            assert!(ok, "setting {key:?} in {} isn't classified in sync/mod.rs", path.display());
         }
     }
 }

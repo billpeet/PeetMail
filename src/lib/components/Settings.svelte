@@ -2,7 +2,7 @@
   // Settings: one page per area, chosen in the sidebar. Most settings apply as soon as
   // they change; the offline cache has a Save button, because widening it resyncs.
   import { onMount } from "svelte";
-  import { Bell, CalendarDays, HardDrive, KeyRound, Mail, RefreshCw, ShieldCheck, Users } from "@lucide/svelte";
+  import { Bell, CalendarDays, Cloud, HardDrive, KeyRound, Mail, RefreshCw, ShieldCheck, Users } from "@lucide/svelte";
   import { api } from "#lib/api.js";
   import type { Privacy, UpdateChannel } from "#lib/api.js";
   import { keymap } from "#lib/keys.svelte.js";
@@ -18,6 +18,7 @@
   import SignatureEditor from "./SignatureEditor.svelte";
   import SnippetEditor from "./SnippetEditor.svelte";
   import SplitEditor from "./SplitEditor.svelte";
+  import SyncSection from "./SyncSection.svelte";
 
   /** The build has PeetMail's own app for at least one provider; the user's own are an advanced option. */
   const builtinAny = $derived(!!mail.boot?.builtin.microsoft || !!mail.boot?.builtin.google);
@@ -30,6 +31,7 @@
     { id: "storage", label: "Storage", icon: HardDrive },
     { id: "updates", label: "Updates", icon: RefreshCw },
     { id: "privacy", label: "Privacy", icon: ShieldCheck },
+    { id: "sync", label: "Sync", icon: Cloud },
     { id: "apps", label: builtinAny ? "Advanced" : "Sign-in apps", icon: KeyRound, separatorBefore: true },
   ]);
 
@@ -265,6 +267,9 @@
       </SettingsCard>
       {#if !privacy.configured}<span data-testid="crash-reports-off" class="sr-only">This build doesn't send crash reports.</span>{/if}
       {#if !privacy.usageConfigured}<span data-testid="usage-data-off" class="sr-only">This build doesn't send usage data.</span>{/if}
+    {:else if page === "sync"}
+      {@render heading("Sync", "Your settings, the same on every PC you use.")}
+      <SyncSection />
     {:else if page === "apps"}
       <div data-testid="advanced-apps" class="space-y-7">
         {#if builtinAny}

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, onCalendarChanged, onDraftsChanged, onMailChanged, onOutbox, onScheduledChanged, onSyncStatus } from "#lib/api.js";
+  import { api, onCalendarChanged, onDraftsChanged, onMailChanged, onOutbox, onScheduledChanged, onSettingsChanged, onSyncStatus } from "#lib/api.js";
+  import { settingsSync } from "#lib/settingsSync.svelte.js";
   import { calendar } from "#lib/calendar.svelte.js";
   import { keymap } from "#lib/keys.svelte.js";
   import { mail } from "#lib/mail.svelte.js";
@@ -134,6 +135,8 @@
       health.init(),
       onScheduledChanged(() => mail.refreshScheduled()),
       onDraftsChanged(() => mail.refreshDrafts()),
+      settingsSync.init(),
+      onSettingsChanged((keys) => mail.reloadSettings(keys)),
       onOutbox((s) => {
         if (s.failed > mail.outbox.failed && s.lastError) mail.showToast({ text: `Couldn't sync a change: ${s.lastError}`, error: true });
         mail.setOutbox(s);
@@ -215,6 +218,8 @@
       { id: "app.update.check", keys: "", label: "Check for updates", group: "App", when: () => !!mail.account && !updates.busy, run: () => updates.check() },
       { id: "app.sync", keys: "ctrl+r", label: "Sync now", group: "App", when: base, run: () => mail.syncNow() },
       { id: "app.settings", keys: "ctrl+,", label: "Settings", group: "App", when: base, run: () => mail.openSettings() },
+      { id: "app.settingsSync", keys: "", label: "Settings sync", group: "App", when: base, run: () => mail.openSettings("sync") },
+      { id: "app.settingsSync.now", keys: "", label: "Sync settings now", group: "App", when: () => base() && settingsSync.on, run: () => settingsSync.syncNow().catch((e) => mail.showToast({ text: String(e), error: true })) },
       { id: "app.help", keys: "?", label: "Keyboard shortcuts", group: "App", when: () => !!mail.account && !mail.composerActive, run: () => (mail.overlay = mail.overlay === "help" ? null : "help") },
       // The event editor handles Esc itself (it asks before discarding changes).
       { id: "app.close", keys: "Escape", label: "Close dialog", group: "App", when: () => mail.overlay !== null && mail.overlay !== "editevent", run: () => {

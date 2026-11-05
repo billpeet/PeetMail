@@ -48,15 +48,18 @@ opentelemetry_sdk = { version = "0.33", default-features = false, features = ["t
 # OTLP over HTTP/JSON (what the gateway takes, and what the harness's fake collector reads).
 opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-json", "reqwest-blocking-client", "trace", "metrics", "logs"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
+# Settings sync (src/sync/): AES-256-GCM, HKDF and HMAC for items, and the passphrase's
+# key derivation. ring is already in the tree through rustls.
+ring = "0.17"
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_UI_WindowsAndMessaging", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_Registry", "Win32_Storage_FileSystem"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Saved sign-ins: a key in the desktop keyring (Secret Service) encrypts them (secure.rs).
-# zbus 5 and ring are already in the tree (notifications, single-instance, rustls).
+# zbus 5 is already in the tree (notifications, single-instance); ring is a dependency above.
 secret-service = { version = "5.2", features = ["rt-async-io-crypto-rust"] }
-ring = "0.17"
 libc = "0.2"
 
 

@@ -499,3 +499,45 @@ export const onUpdateStatus = (cb: (s: UpdateStatus) => void): Promise<UnlistenF
 
 export const onSyncStatus = (cb: (s: SyncStatus) => void): Promise<UnlistenFn> =>
   listen<SyncStatus>("sync-status", (e) => cb(e.payload));
+
+// ---------- settings sync (src-tauri/src/sync, docs/SYNC.md) ----------
+
+/** How a mail account stands with the sync account. */
+export type SyncLinkState = "linked" | "elsewhere" | "unlinked" | "failed" | "pending";
+export type SettingsSyncStatus = {
+  state: "off" | "idle" | "syncing" | "error";
+  server: string | null;
+  lastSyncedAt: string | null;
+  error: string | null;
+  /** A sign-in waiting for its next step. */
+  pending: "join" | "create" | null;
+  accounts: { accountId: number; email: string; state: SyncLinkState }[];
+};
+export type SyncConnected = { next: "join" | "create"; accounts: { id: number; email: string }[] };
+export type SyncDevice = { id: number; name: string; createdAt: string; lastSeenAt: string; current: boolean };
+export type SyncIdentity = { id: number; provider: "microsoft" | "google"; email: string | null; linkedAt: string };
+
+export const settingsSyncApi = {
+  status: () => invoke<SettingsSyncStatus>("settings_sync_status"),
+  connect: (server: string) => invoke<SyncConnected>("settings_sync_connect", { server }),
+  /** The passphrase or the recovery key. */
+  join: (secret: string) => invoke<SettingsSyncStatus>("settings_sync_join", { secret }),
+  create: (accountId: number, passphrase: string) => invoke<{ recoveryKey: string }>("settings_sync_create", { accountId, passphrase }),
+  cancel: () => invoke<void>("settings_sync_cancel"),
+  syncNow: () => invoke<SettingsSyncStatus>("settings_sync_now"),
+  devices: () => invoke<SyncDevice[]>("settings_sync_devices"),
+  revoke: (deviceId: number) => invoke<void>("settings_sync_revoke", { deviceId }),
+  identities: () => invoke<SyncIdentity[]>("settings_sync_identities"),
+  unlink: (identityId: number) => invoke<void>("settings_sync_unlink", { identityId }),
+  changePassphrase: (passphrase: string) => invoke<void>("settings_sync_change_passphrase", { passphrase }),
+  recoveryKey: () => invoke<string>("settings_sync_recovery_key"),
+  disable: () => invoke<void>("settings_sync_disable"),
+  deleteAccount: () => invoke<void>("settings_sync_delete_account"),
+};
+
+export const onSettingsSyncStatus = (cb: (s: SettingsSyncStatus) => void): Promise<UnlistenFn> =>
+  listen<SettingsSyncStatus>("settings-sync-status", (e) => cb(e.payload));
+
+/** Settings another device changed (`keys`), so whatever shows them reloads. */
+export const onSettingsChanged = (cb: (keys: string[]) => void): Promise<UnlistenFn> =>
+  listen<{ keys: string[] }>("settings-changed", (e) => cb(e.payload.keys));

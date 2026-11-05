@@ -25,6 +25,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0013_draft_sync.sql"),
     include_str!("../migrations/0014_settings_items.sql"),
     include_str!("../migrations/0015_outbox_ids.sql"),
+    include_str!("../migrations/0016_settings_sync.sql"),
 ];
 
 pub struct Db {
@@ -157,8 +158,31 @@ pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
         .optional()?)
 }
 
+/// Saves a setting. A real change to a synced one is recorded for settings sync (sync/store.rs);
+/// writing the value it already has changes nothing.
 pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
-    debug_assert!(crate::sync::scope(key).is_some(), "setting {key:?} isn't classified as synced or local in sync.rs");
+    let scope = crate::sync::scope(key);
+    debug_assert!(scope.is_some(), "setting {key:?} isn't classified as synced or local in sync/mod.rs");
+    if get_setting(conn, key)?.as_deref() == Some(value) {
+        return Ok(());
+    }
+    write_setting_unsynced(conn, key, value)?;
+    if scope == Some(crate::sync::Scope::Synced) {
+        crate::sync::store::touch(conn, key, false)?;
+    }
+    Ok(())
+}
+
+pub fn delete_setting(conn: &Connection, key: &str) -> Result<()> {
+    let removed = conn.execute("DELETE FROM settings WHERE key = ?1", [key])? > 0;
+    if removed && crate::sync::scope(key) == Some(crate::sync::Scope::Synced) {
+        crate::sync::store::touch(conn, key, true)?;
+    }
+    Ok(())
+}
+
+/// Writes a setting without recording it for sync: for values that came from the server.
+pub fn write_setting_unsynced(conn: &Connection, key: &str, value: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
          ON CONFLICT (key) DO UPDATE SET value = excluded.value",
@@ -167,7 +191,7 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn delete_setting(conn: &Connection, key: &str) -> Result<()> {
+pub fn delete_setting_unsynced(conn: &Connection, key: &str) -> Result<()> {
     conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
     Ok(())
 }

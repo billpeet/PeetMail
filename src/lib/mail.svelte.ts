@@ -47,7 +47,7 @@ export type Overlay = null | "help" | "settings" | "palette" | "event" | "quicka
 export type MailView = Mailbox | "scheduled" | "drafts";
 
 /** The pages of Settings, in sidebar order. */
-export type SettingsPage = "accounts" | "mail" | "calendar" | "notifications" | "storage" | "updates" | "privacy" | "apps";
+export type SettingsPage = "accounts" | "mail" | "calendar" | "notifications" | "storage" | "updates" | "privacy" | "sync" | "apps";
 
 export type ComposerState = {
   /** The account it's sent from. */
@@ -502,6 +502,17 @@ class MailStore {
     const folders = await api.listFolders(this.account.id);
     this.folder = folders.find((f) => f.role === "inbox") ?? null;
     await this.refresh();
+  }
+
+  /** Settings another device changed (settings sync): shows their new values. */
+  async reloadSettings(keys: string[]) {
+    if (!this.boot) return;
+    const { preferences } = await api.bootstrap();
+    this.boot = { ...this.boot, preferences };
+    calendar.setWeekStartsOn(preferences.weekStartsOn);
+    if (keys.some((k) => k.startsWith("snippet:"))) this.snippets = await api.listSnippets();
+    if (keys.some((k) => k.startsWith("signature:"))) this.signatures = await api.listSignatures();
+    if (keys.some((k) => k.startsWith("split:"))) await this.refresh();
   }
 
   /** Called on every `mail-changed` event; coalesces bursts during initial sync. */
