@@ -1,0 +1,11 @@
+# The app (this directory) and the self-hosted sync server (docs/SYNC.md).
+packages:
+  - server
+
+allowBuilds:
+  # The sync server's SQLite driver ships a prebuilt binary for every platform (prebuilds/).
+  # pnpm would otherwise run node-gyp on its binding.gyp, compiling it again for nothing.
+  better-sqlite3: false
+  # esbuild (via drizzle-kit) only checks its binary in a postinstall script; the binary comes
+  # from its platform package either way.
+  esbuild: false
