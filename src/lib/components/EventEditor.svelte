@@ -183,11 +183,14 @@
   $effect(() => {
     const id = accountId;
     meetingProvider = null;
+    // A new event's tick was for the last calendar's meeting kind; this one may offer another, or none.
+    if (creating) online = false;
     api.meetingProvider(id).then((p) => accountId === id && (meetingProvider = p), () => {});
   });
   const hadOnline = $derived(!!original?.onlineMeeting);
   /** Once an event has one it stays: Outlook and Google don't take it off again. */
-  const canAddOnline = $derived(!guestMode && !hadOnline && !!meetingProvider);
+  /** Not on one occurrence: an online meeting belongs to the whole series. */
+  const canAddOnline = $derived(!guestMode && !hadOnline && !!meetingProvider && !(inSeries && !seriesScope));
   const onlineLabel = $derived.by(() => {
     const p = meetingProvider ?? "";
     if (p === "hangoutsMeet") return "Google Meet";
@@ -670,7 +673,7 @@
           {#if canAddOnline || hadOnline}
             <span>Online</span>
             <span class="flex items-center gap-2">
-              <label class="flex items-center gap-1.5" title="Ctrl+M">
+              <label data-testid="editor-online" class="flex items-center gap-1.5" title="Ctrl+M">
                 <input data-testid="editor-online-meeting" type="checkbox" tabindex="-1" bind:checked={online} onchange={() => (armedDiscard = false)} disabled={!canAddOnline} class="accent-accent" />
                 <Video size={14} class="text-ink-500" />
                 {hadOnline ? "Has an online meeting" : onlineLabel}

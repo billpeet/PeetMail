@@ -68,7 +68,11 @@
   onMount(() => {
     calendar.loadWeek();
     tick().then(() => scroller && (scroller.scrollTop = 7 * HOUR));
-    const timer = setInterval(() => (now = new Date()), 60_000);
+    // The minute tick checks the date too, so "now" and "today" never disagree past midnight.
+    const timer = setInterval(() => {
+      now = new Date();
+      calendar.rollover(now);
+    }, 60_000);
     return () => clearInterval(timer);
   });
 </script>

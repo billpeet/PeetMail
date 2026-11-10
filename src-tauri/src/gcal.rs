@@ -330,6 +330,14 @@ pub async fn event_detail(state: &AppState, account_id: i64, remote_id: &str) ->
     })
 }
 
+/// Google Meet, if the primary calendar allows it (`conferenceProperties`): some Workspace
+/// domains turn conferencing off, and asking for it there fails the whole save.
+pub async fn meeting_solution(state: &AppState, account_id: i64) -> Result<Option<String>> {
+    let v = call(state, account_id, Method::GET, &format!("{}/calendars/primary?fields=conferenceProperties", *BASE), None).await?;
+    let allowed = v.pointer("/conferenceProperties/allowedConferenceSolutionTypes").and_then(Value::as_array);
+    Ok(allowed.is_some_and(|a| a.iter().any(|t| t == "hangoutsMeet")).then(|| "hangoutsMeet".to_string()))
+}
+
 // ---------- invites ----------
 
 /// What an invitation's text/calendar part says.
@@ -340,12 +348,15 @@ pub struct Ics {
     pub method: String,
     /// For REPLY: the attendee's answer (ACCEPTED / DECLINED / TENTATIVE).
     pub partstat: Option<String>,
+    /// For one occurrence of a series: its RECURRENCE-ID as `params:value`
+    /// (`TZID=Europe/London:20261110T103000`, `:20261110T103000Z`, `VALUE=DATE:20261110`).
+    pub recurrence_id: Option<String>,
 }
 
 pub fn parse_ics(text: &str) -> Option<Ics> {
     let unfolded = text.replace("\r\n ", "").replace("\r\n\t", "").replace("\n ", "").replace("\n\t", "");
     let mut method = String::from("PUBLISH");
-    let (mut uid, mut partstat, mut in_event) = (None, None, false);
+    let (mut uid, mut partstat, mut recurrence_id, mut in_event) = (None, None, None, false);
     for line in unfolded.lines() {
         let line = line.trim_end_matches('\r');
         let (key, value) = line.split_once(':').unwrap_or((line, ""));
@@ -355,13 +366,16 @@ pub fn parse_ics(text: &str) -> Option<Ics> {
             "BEGIN" if value.eq_ignore_ascii_case("VEVENT") => in_event = true,
             "END" if value.eq_ignore_ascii_case("VEVENT") => break,
             "UID" if in_event && uid.is_none() => uid = Some(value.trim().to_string()),
+            "RECURRENCE-ID" if in_event => {
+                recurrence_id = Some(format!("{}:{}", key.split_once(';').map_or("", |(_, p)| p), value.trim()));
+            }
             "ATTENDEE" if in_event && partstat.is_none() => {
                 partstat = key.split(';').find_map(|p| p.to_ascii_uppercase().strip_prefix("PARTSTAT=").map(String::from));
             }
             _ => {}
         }
     }
-    Some(Ics { uid: uid.filter(|u| !u.is_empty())?, method, partstat })
+    Some(Ics { uid: uid.filter(|u| !u.is_empty())?, method, partstat, recurrence_id })
 }
 
 fn meeting_type(ics: &Ics) -> &'static str {
@@ -378,9 +392,10 @@ fn meeting_type(ics: &Ics) -> &'static str {
 /// doesn't refetch the message.
 pub fn record_invite(conn: &Connection, message_id: i64, ics: Option<&Ics>) -> Result<()> {
     conn.execute(
-        "INSERT INTO message_invites (message_id, uid, method, partstat) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT (message_id) DO UPDATE SET uid = excluded.uid, method = excluded.method, partstat = excluded.partstat",
-        params![message_id, ics.map(|i| &i.uid), ics.map(|i| &i.method), ics.and_then(|i| i.partstat.as_ref())],
+        "INSERT INTO message_invites (message_id, uid, method, partstat, recurrence_id) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT (message_id) DO UPDATE SET uid = excluded.uid, method = excluded.method, partstat = excluded.partstat,
+           recurrence_id = excluded.recurrence_id",
+        params![message_id, ics.map(|i| &i.uid), ics.map(|i| &i.method), ics.and_then(|i| i.partstat.as_ref()), ics.and_then(|i| i.recurrence_id.as_ref())],
     )?;
     Ok(())
 }
@@ -388,10 +403,40 @@ pub fn record_invite(conn: &Connection, message_id: i64, ics: Option<&Ics>) -> R
 /// Some(None): checked, no invitation. None: not checked yet.
 fn recorded_invite(conn: &Connection, message_id: i64) -> Result<Option<Option<Ics>>> {
     Ok(conn
-        .query_row("SELECT uid, method, partstat FROM message_invites WHERE message_id = ?1", [message_id], |r| {
-            Ok(r.get::<_, Option<String>>(0)?.map(|uid| Ics { uid, method: r.get::<_, Option<String>>(1).ok().flatten().unwrap_or_default(), partstat: r.get(2).ok().flatten() }))
+        .query_row("SELECT uid, method, partstat, recurrence_id FROM message_invites WHERE message_id = ?1", [message_id], |r| {
+            Ok(r.get::<_, Option<String>>(0)?.map(|uid| Ics {
+                uid,
+                method: r.get::<_, Option<String>>(1).ok().flatten().unwrap_or_default(),
+                partstat: r.get(2).ok().flatten(),
+                recurrence_id: r.get(3).ok().flatten(),
+            }))
         })
         .optional()?)
+}
+
+/// Which of the events sharing an invitation's UID it's about. An invitation to one occurrence
+/// (RECURRENCE-ID) is about that occurrence, never the series: with no match there's no card,
+/// rather than one that answers every meeting. Otherwise the series (or the one event).
+fn pick_invite_item<'a>(items: &'a [Value], recurrence_id: Option<&str>) -> Option<&'a Value> {
+    let Some(rid) = recurrence_id else {
+        return items.iter().find(|i| i.get("recurringEventId").is_none()).or_else(|| items.first());
+    };
+    let (params, value) = rid.split_once(':').unwrap_or(("", rid));
+    let value = value.trim();
+    items.iter().filter(|i| i.get("recurringEventId").is_some()).find(|i| {
+        if let Some(date) = i.pointer("/originalStartTime/date").and_then(Value::as_str) {
+            return date.replace('-', "") == value.get(..8).unwrap_or(value);
+        }
+        let Some(dt) = i.pointer("/originalStartTime/dateTime").and_then(Value::as_str) else { return false };
+        let Ok(start) = chrono::DateTime::parse_from_rfc3339(dt) else { return false };
+        if let Some(utc) = value.strip_suffix('Z') {
+            return start.with_timezone(&chrono::Utc).format("%Y%m%dT%H%M%S").to_string() == utc;
+        }
+        // A local time in the organiser's zone: Google gives the original start in that zone too.
+        let zone = params.split(';').find_map(|p| p.strip_prefix("TZID="));
+        let same_zone = zone.is_none() || zone == i.pointer("/originalStartTime/timeZone").and_then(Value::as_str);
+        same_zone && start.format("%Y%m%dT%H%M%S").to_string() == value
+    })
 }
 
 /// The calendar event behind a Gmail invitation, via the UID in its text/calendar part.
@@ -407,18 +452,20 @@ pub async fn invite_for_message(state: &AppState, message_id: i64, account_id: i
     let Some(ics) = ics else { return Ok(None) };
     let url = url::Url::parse_with_params(&events_url(), &[("iCalUID", ics.uid.as_str())]).expect("valid url").to_string();
     let found = call(state, account_id, Method::GET, &url, None).await?;
-    let Some(item) = found["items"].as_array().and_then(|i| i.first()) else { return Ok(None) };
+    let Some(item) = found["items"].as_array().and_then(|items| pick_invite_item(items, ics.recurrence_id.as_deref())) else { return Ok(None) };
     let Some(parsed) = parse_event(item) else { return Ok(None) };
     // Google's start is the series' first day in its own zone (dateTime carries the offset).
     let first_day = item.pointer("/start/dateTime").or_else(|| item.pointer("/start/date")).and_then(Value::as_str).and_then(|s| s.get(..10));
     let lines: Option<Vec<String>> = item["recurrence"].as_array().map(|a| a.iter().filter_map(|l| l.as_str().map(String::from)).collect());
     let recurrence = lines.zip(first_day).and_then(|(l, d)| crate::recurrence::from_rrule(&l, d));
-    let event = state.db.with(|c| {
+    let (event, next) = state.db.with(|c| {
         let busy = crate::outbox::busy_remote_ids(c, account_id)?;
         if !busy.contains(&parsed.remote_id) || calendar::event_by_remote(c, account_id, &parsed.remote_id)?.is_none() {
             calendar::upsert_event(c, account_id, &parsed)?;
         }
-        calendar::event_by_remote(c, account_id, &parsed.remote_id)?.ok_or_else(|| AppError::Other("event vanished".into()))
+        let event = calendar::event_by_remote(c, account_id, &parsed.remote_id)?.ok_or_else(|| AppError::Other("event vanished".into()))?;
+        let next = calendar::next_for_invite(c, account_id, &event)?;
+        Ok((event, next))
     })?;
     Ok(Some(Invite {
         meeting_message_type: Some(meeting_type(&ics).into()),
@@ -428,6 +475,7 @@ pub async fn invite_for_message(state: &AppState, message_id: i64, account_id: i
         previous_location: None,
         recurrence,
         event,
+        next,
     }))
 }
 
@@ -474,12 +522,33 @@ mod tests {
     #[test]
     fn reads_the_uid_and_method_of_an_invitation() {
         let ics = "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VTIMEZONE\r\nTZID:X\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:lunch-1\r\n 23@google.com\r\nATTENDEE;CN=Me;PARTSTAT=NEEDS-ACTION:mailto:me@gmail.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
-        assert_eq!(parse_ics(ics), Some(Ics { uid: "lunch-123@google.com".into(), method: "REQUEST".into(), partstat: Some("NEEDS-ACTION".into()) }));
+        assert_eq!(parse_ics(ics), Some(Ics { uid: "lunch-123@google.com".into(), method: "REQUEST".into(), partstat: Some("NEEDS-ACTION".into()), recurrence_id: None }));
         let i = parse_ics(&ics.replace("METHOD:REQUEST", "METHOD:CANCEL")).unwrap();
         assert_eq!(meeting_type(&i), "meetingCancelled");
         let r = parse_ics(&ics.replace("METHOD:REQUEST", "METHOD:REPLY").replace("NEEDS-ACTION", "DECLINED")).unwrap();
         assert_eq!(meeting_type(&r), "meetingDeclined");
         assert_eq!(parse_ics("BEGIN:VCALENDAR\r\nEND:VCALENDAR"), None);
+    }
+
+    #[test]
+    fn an_invitation_to_one_occurrence_finds_that_occurrence_never_the_series() {
+        let ics = |rid: &str| format!("BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:standup@google.com\r\n{rid}END:VEVENT\r\nEND:VCALENDAR\r\n");
+        assert_eq!(parse_ics(&ics("")).unwrap().recurrence_id, None);
+        let rid = parse_ics(&ics("RECURRENCE-ID;TZID=Australia/Sydney:20261110T103000\r\n")).unwrap().recurrence_id;
+        assert_eq!(rid.as_deref(), Some("TZID=Australia/Sydney:20261110T103000"));
+
+        let master = json!({ "id": "standup", "recurrence": ["RRULE:FREQ=WEEKLY"] });
+        let moved = json!({ "id": "standup_20261109T233000Z", "recurringEventId": "standup",
+            "originalStartTime": { "dateTime": "2026-11-10T10:30:00+11:00", "timeZone": "Australia/Sydney" } });
+        let items = [master.clone(), moved.clone()];
+        assert_eq!(pick_invite_item(&items, None), Some(&master));
+        assert_eq!(pick_invite_item(&items, rid.as_deref()), Some(&moved));
+        assert_eq!(pick_invite_item(&items, Some(":20261109T233000Z")), Some(&moved));
+        // Another occurrence, or one Google didn't list: no card, rather than answering the series.
+        assert_eq!(pick_invite_item(&items, Some("TZID=Australia/Sydney:20261117T103000")), None);
+        assert_eq!(pick_invite_item(&[master], rid.as_deref()), None);
+        let day = json!({ "id": "leave_20261110", "recurringEventId": "leave", "originalStartTime": { "date": "2026-11-10" } });
+        assert_eq!(pick_invite_item(std::slice::from_ref(&day), Some("VALUE=DATE:20261110")), Some(&day));
     }
 
     #[test]

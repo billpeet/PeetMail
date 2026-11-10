@@ -478,10 +478,14 @@ test("editing a series' pattern: the end date; one occurrence can't change it", 
   await openEditor(page, "evt-review-1", "o");
   await expect(page.getByTestId("editor-repeat-select")).toHaveCount(0);
   await expect(page.getByTestId("editor-repeat")).toHaveText("Part of a series");
+  // Nor can it get its own Teams meeting: that belongs to the series.
+  await page.waitForTimeout(300);
+  await expect(page.getByTestId("editor-online-meeting")).toHaveCount(0);
   await page.keyboard.press("Escape");
 
   await openEditor(page, "evt-review-1", "s");
   await expect(page.getByTestId("editor-repeat-select")).toHaveValue("weekly"); // recognised as the preset
+  await expect(page.getByTestId("editor-online")).toContainText("Teams meeting");
   await page.getByTestId("repeat-end").selectOption("until");
   const until = new Date();
   until.setDate(until.getDate() + 30);
@@ -562,21 +566,32 @@ test("an existing event can get a Teams link, and then shows it has one", async 
   await expect(online.locator("xpath=..")).toContainText("Has an online meeting");
 });
 
-test("a calendar that offers no online meetings shows no toggle; one that offers Skype says so", async ({ inbox: page, fake }) => {
-  await fake.control("config", { meetingProviders: { allowedOnlineMeetingProviders: [], defaultOnlineMeetingProvider: "unknown" } });
-  await page.keyboard.press("Shift+C");
-  await page.getByTestId("quick-add-input").fill("Coffee tomorrow 3pm");
-  await page.keyboard.press("Tab");
-  await expect(page.getByTestId("event-editor")).toBeVisible();
-  await page.waitForTimeout(500);
-  await expect(page.getByTestId("editor-online-meeting")).toHaveCount(0);
-  await page.getByTestId("editor-cancel").click();
-  await page.getByTestId("editor-cancel").click();
-  await expect(page.getByTestId("event-editor")).toHaveCount(0);
+test("a calendar that offers Skype says so; one that offers nothing (or only retired Skype) shows no toggle", async ({ inbox: page, fake }) => {
+  const openEditor = async () => {
+    await page.keyboard.press("Shift+C");
+    await page.getByTestId("quick-add-input").fill("Coffee tomorrow 3pm");
+    await page.keyboard.press("Tab");
+    await expect(page.getByTestId("event-editor")).toBeVisible();
+  };
+  const closeEditor = async () => {
+    await page.getByTestId("editor-cancel").click();
+    await page.getByTestId("editor-cancel").click();
+    await expect(page.getByTestId("event-editor")).toHaveCount(0);
+  };
+  await fake.control("config", { meetingProviders: { allowedOnlineMeetingProviders: ["skypeForBusiness"], defaultOnlineMeetingProvider: "skypeForBusiness" } });
+  await openEditor();
+  await expect(page.getByTestId("editor-online")).toContainText("Skype meeting");
+  await closeEditor();
 
-  await fake.control("config", { meetingProviders: { allowedOnlineMeetingProviders: ["skypeForConsumer"], defaultOnlineMeetingProvider: "skypeForConsumer" } });
-  await page.keyboard.press("Shift+C");
-  await page.getByTestId("quick-add-input").fill("Coffee tomorrow 3pm");
-  await page.keyboard.press("Tab");
-  await expect(page.getByTestId("editor-online-meeting").locator("xpath=..")).toContainText("Skype meeting");
+  const asked = () => fake.state.requests.filter((r) => r.path.endsWith("/me/calendar")).length;
+  for (const allowed of [[], ["skypeForConsumer"]]) {
+    await fake.control("config", { meetingProviders: { allowedOnlineMeetingProviders: allowed, defaultOnlineMeetingProvider: allowed[0] ?? "unknown" } });
+    const before = asked();
+    await openEditor();
+    // Once the answer is in, there's still no toggle.
+    await expect.poll(asked).toBeGreaterThan(before);
+    await page.waitForTimeout(300);
+    await expect(page.getByTestId("editor-online-meeting")).toHaveCount(0);
+    await closeEditor();
+  }
 });

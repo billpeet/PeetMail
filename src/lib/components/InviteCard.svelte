@@ -42,8 +42,10 @@
   const cancelled = $derived(invite.meetingMessageType === "meetingCancelled" || e.isCancelled);
   const answerable = $derived(!cancelled && !e.isOrganizer && invite.meetingMessageType !== "meetingAccepted");
 
+  /** The meeting the card's time is for: a series' next one when it's known, else its first. */
+  const shown = $derived(invite.next ?? e);
   const when = $derived.by(() => {
-    const { start, end } = eventTimes(e);
+    const { start, end } = eventTimes(shown);
     const date = start.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
     if (e.isAllDay) return `${date} · all day`;
     const t = (d: Date) => d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
@@ -64,7 +66,7 @@
   ];
 
   function showInCalendar() {
-    calendar.showWeekOf(eventTimes(e).start);
+    calendar.showWeekOf(eventTimes(shown).start);
     mail.view = "calendar";
     calendar.selected = e;
     mail.overlay = "event";
@@ -79,7 +81,7 @@
         {#if isUpdate && !cancelled}<span class="mr-1 rounded bg-amber-400/15 px-1.5 py-0.5 text-[11px] font-medium text-amber-300">Updated</span>{/if}
         {e.subject || "(no title)"}
       </p>
-      <p class="mt-0.5 text-sm text-ink-300">{invite.recurrence ? `First: ${when}` : when}</p>
+      <p class="mt-0.5 text-sm text-ink-300">{invite.recurrence ? `${invite.next ? "Next" : "First"}: ${when}` : when}</p>
       {#if invite.recurrence}
         <p data-testid="invite-recurrence" class="mt-0.5 flex items-center gap-1 text-sm text-ink-500"><Repeat size={13} />{describeRecurrence(invite.recurrence)}</p>
       {/if}

@@ -280,6 +280,28 @@ pub fn event_by_remote(conn: &Connection, account_id: i64, remote_id: &str) -> R
         .optional()?)
 }
 
+/// A series' next occurrence (not yet over) in the cached calendar.
+pub fn next_occurrence(conn: &Connection, account_id: i64, master_id: &str, now: &str) -> Result<Option<Event>> {
+    Ok(conn
+        .query_row(
+            &format!(
+                "SELECT {EVENT_COLS} FROM event_view WHERE account_id = ?1 AND series_master_id = ?2 AND end_at > ?3
+                 ORDER BY start_at LIMIT 1"
+            ),
+            params![account_id, master_id, now],
+            event_from_row,
+        )
+        .optional()?)
+}
+
+/// What an invite's sidebar shows for its event: a series' next meeting, if one is cached.
+pub(crate) fn next_for_invite(conn: &Connection, account_id: i64, event: &Event) -> Result<Option<Event>> {
+    if event.event_type != "seriesMaster" {
+        return Ok(None);
+    }
+    next_occurrence(conn, account_id, &event.remote_id, &chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string())
+}
+
 pub(crate) struct SyncState {
     /// Graph delta link, or Google's sync token.
     pub delta_link: Option<String>,
@@ -553,6 +575,9 @@ pub struct Invite {
     /// How the series repeats, when the invite is for a recurring meeting.
     pub recurrence: Option<crate::recurrence::Recurrence>,
     pub event: Event,
+    /// For a series: its next meeting on this PC's calendar, which the sidebar shows (the
+    /// series' own start can be months back, outside what's synced).
+    pub next: Option<Event>,
 }
 
 /// The calendar event behind a meeting-invite message (cached into `events`), or None for
@@ -570,13 +595,15 @@ pub async fn invite_for_message(state: &AppState, message_id: i64) -> Result<Opt
     let url = format!("{}/me/messages/{remote_id}?$expand=microsoft.graph.eventMessage/event", graph::base());
     let v = mail::graph_call(state, account_id, reqwest::Method::GET, &url, None, &[PREFER_IMMUTABLE, PREFER_UTC]).await?;
     let Some(parsed) = v.get("event").and_then(parse_event) else { return Ok(None) };
-    let event = state.db.with(|c| {
+    let (event, next) = state.db.with(|c| {
         // A queued RSVP wins over the server's not-yet-updated copy.
         let busy = crate::outbox::busy_remote_ids(c, account_id)?;
         if !busy.contains(&parsed.remote_id) || event_by_remote(c, account_id, &parsed.remote_id)?.is_none() {
             upsert_event(c, account_id, &parsed)?;
         }
-        event_by_remote(c, account_id, &parsed.remote_id)?.ok_or_else(|| AppError::Other("event vanished".into()))
+        let event = event_by_remote(c, account_id, &parsed.remote_id)?.ok_or_else(|| AppError::Other("event vanished".into()))?;
+        let next = next_for_invite(c, account_id, &event)?;
+        Ok((event, next))
     })?;
     let previous = |k: &str| v.get(k).filter(|p| !p.is_null()).and_then(utc_instant);
     Ok(Some(Invite {
@@ -587,6 +614,7 @@ pub async fn invite_for_message(state: &AppState, message_id: i64) -> Result<Opt
         previous_location: v.pointer("/previousLocation/displayName").and_then(Value::as_str).filter(|s| !s.is_empty()).map(String::from),
         recurrence: v.pointer("/event/recurrence").filter(|r| !r.is_null()).and_then(crate::recurrence::from_graph),
         event,
+        next,
     }))
 }
 
@@ -846,6 +874,16 @@ mod tests {
 
             respond(c, a, "series", crate::outbox::Rsvp::Accept)?;
             assert_eq!(event_by_remote(c, a, "series")?.unwrap().response.as_deref(), Some("accepted"));
+
+            // Its next meeting, not one that's over, nor another series'.
+            for (id, start, end, of) in [("past", "2026-11-09T23:30:00", "2026-11-10T00:00:00", "series"), ("next", "2026-11-16T23:30:00", "2026-11-17T00:00:00", "series"), ("later", "2026-11-23T23:30:00", "2026-11-24T00:00:00", "series"), ("other", "2026-11-12T23:30:00", "2026-11-13T00:00:00", "elsewhere")] {
+                let mut o = parse_event(&timed(id, start, end)).unwrap();
+                o.event_type = "occurrence".into();
+                o.series_master_id = Some(of.into());
+                upsert_event(c, a, &o)?;
+            }
+            assert_eq!(next_occurrence(c, a, "series", "2026-11-11T00:00:00Z")?.map(|e| e.remote_id).as_deref(), Some("next"));
+            assert_eq!(next_occurrence(c, a, "series", "2026-11-30T00:00:00Z")?, None);
             Ok(())
         })
         .unwrap();

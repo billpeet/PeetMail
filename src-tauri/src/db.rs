@@ -28,6 +28,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0016_search_cache.sql"),
     include_str!("../migrations/0017_settings_sync.sql"),
     include_str!("../migrations/0018_account_items.sql"),
+    include_str!("../migrations/0019_invite_recurrence_id.sql"),
 ];
 
 pub struct Db {

@@ -44,6 +44,22 @@ describe("a new day", () => {
     expect(calendar.weekStart).toEqual(startOfWeek(addDays(lastDayOfWeek, 1), calendar.weekStartsOn));
   });
 
+  it("after the PC's time zone changes, the week on screen is this week in the new zone", () => {
+    // Put back by name: unsetting TZ doesn't make Node look the zone up again.
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    try {
+      process.env.TZ = "Pacific/Auckland";
+      calendar.rollover(new Date());
+      calendar.weekStart = startOfWeek(calendar.todayStart, calendar.weekStartsOn);
+      process.env.TZ = "America/Los_Angeles";
+      calendar.rollover(new Date());
+      expect(calendar.isThisWeek).toBe(true);
+      expect(calendar.weekStart).toEqual(startOfWeek(new Date(), calendar.weekStartsOn));
+    } finally {
+      process.env.TZ = zone;
+    }
+  });
+
   it("with an invite open, the day view stays on the meeting; closing it goes to the new today", async () => {
     const meetingDay = addDays(today, 3);
     await calendar.showInContext({ remoteId: "m", response: null, isAllDay: false, startAt: new Date(meetingDay.getTime() + 10 * 3_600_000).toISOString(), endAt: new Date(meetingDay.getTime() + 11 * 3_600_000).toISOString() } as never);

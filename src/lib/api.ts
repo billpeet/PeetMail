@@ -492,6 +492,8 @@ export type Invite = {
   /** How the series repeats; `event` is then the series master (its first occurrence's times). */
   recurrence: Recurrence | null;
   event: CalendarEvent;
+  /** For a series: its next meeting in the cached calendar (what the sidebar shows). */
+  next: CalendarEvent | null;
 };
 
 export const onScheduledChanged = (cb: () => void): Promise<UnlistenFn> => listen("scheduled-changed", () => cb());

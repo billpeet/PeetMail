@@ -86,6 +86,10 @@ pub struct EventChanges {
     /// teamsForBusiness; "hangoutsMeet" for Google). Once added it can't be taken off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub online_meeting: Option<String>,
+    /// Google's conference request ID, fixed when the change is queued: a retry after a lost
+    /// response must send the same one, or Google makes a second meeting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meeting_request_id: Option<String>,
 }
 
 /// Distinguishes "recurrence": null (stop repeating) from a missing field (unchanged).
@@ -105,6 +109,13 @@ mod double_option {
 impl EventChanges {
     pub fn is_empty(&self) -> bool {
         *self == EventChanges::default()
+    }
+
+    /// Gives a new online meeting its request ID, before the change goes into the outbox.
+    pub fn stamp_meeting_request(&mut self) {
+        if self.online_meeting.is_some() && self.meeting_request_id.is_none() {
+            self.meeting_request_id = Some(format!("peetmail-{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()));
+        }
     }
 }
 
@@ -324,7 +335,9 @@ pub fn google_body(c: &EventChanges) -> Value {
     }
     if c.online_meeting.is_some() {
         // Only honoured with conferenceDataVersion=1 on the request (gcal::execute adds it).
-        let request_id = format!("peetmail-{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default());
+        let mut stamped = c.clone();
+        stamped.stamp_meeting_request();
+        let request_id = stamped.meeting_request_id.unwrap_or_default();
         b.insert("conferenceData".into(), json!({ "createRequest": { "requestId": request_id, "conferenceSolutionKey": { "type": "hangoutsMeet" } } }));
     }
     Value::Object(b)
@@ -376,7 +389,10 @@ pub fn from_google(v: &Value, series: bool, local_zone: &str) -> Option<Editable
         reminder_default: use_default,
         sensitivity: if matches!(s("/visibility").as_deref(), Some("private" | "confidential")) { "private".into() } else { "normal".into() },
         recurrence: lines.and_then(|l| recurrence::from_rrule(&l, &start_date)),
-        online_meeting: v.get("conferenceData").is_some_and(|c| !c.is_null()) || v.get("hangoutLink").is_some_and(|l| l.is_string()),
+        // A meeting, or one Google is still making; a failed request leaves the toggle free to try again.
+        online_meeting: v.get("hangoutLink").is_some_and(|l| l.is_string())
+            || v.pointer("/conferenceData/entryPoints").and_then(Value::as_array).is_some_and(|e| !e.is_empty())
+            || v.pointer("/conferenceData/createRequest/status/statusCode").and_then(Value::as_str) == Some("pending"),
         // Google marks your own events with organizer.self; events without an organizer are yours.
         is_organizer: v.pointer("/organizer/self").and_then(Value::as_bool).unwrap_or(v.get("organizer").is_none()),
         series,
@@ -419,20 +435,21 @@ pub async fn load(state: &AppState, account_id: i64, remote_id: &str, series: bo
 
 /// Which online meeting a new event can get from this calendar (`GET /me/calendar` with
 /// allowed/defaultOnlineMeetingProvider): its default when that's allowed, else the first
-/// allowed one, Teams before Skype. None when it offers none.
+/// allowed one, Teams before Skype. None when it offers none. Skype for consumers closed in
+/// May 2025: a personal account offering only that gets no toggle, not a meeting with no link.
 pub fn pick_meeting_provider(calendar: &Value) -> Option<String> {
-    let allowed: Vec<&str> = calendar["allowedOnlineMeetingProviders"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|p| *p != "unknown").collect();
+    let allowed: Vec<&str> = calendar["allowedOnlineMeetingProviders"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|p| !["unknown", "skypeForConsumer"].contains(p)).collect();
     if let Some(d) = calendar["defaultOnlineMeetingProvider"].as_str().filter(|d| allowed.contains(d)) {
         return Some(d.to_string());
     }
-    ["teamsForBusiness", "skypeForBusiness", "skypeForConsumer"].into_iter().find(|p| allowed.contains(p)).or(allowed.first().copied()).map(String::from)
+    ["teamsForBusiness", "skypeForBusiness"].into_iter().find(|p| allowed.contains(p)).or(allowed.first().copied()).map(String::from)
 }
 
 /// The online meeting the editor offers for this account: Google Meet for Google, else
 /// what the Outlook calendar allows (Teams for work accounts).
 pub async fn meeting_provider(state: &AppState, account_id: i64) -> Result<Option<String>> {
     if state.db.with(|c| crate::db::account_provider(c, account_id))? == "google" {
-        return Ok(Some("hangoutsMeet".into()));
+        return crate::gcal::meeting_solution(state, account_id).await;
     }
     let url = format!("{}/me/calendar?$select=allowedOnlineMeetingProviders,defaultOnlineMeetingProvider", crate::graph::base());
     let v = crate::mail::graph_call(state, account_id, reqwest::Method::GET, &url, None, &[]).await?;
@@ -510,6 +527,7 @@ mod tests {
             sensitivity: Some("private".into()),
             recurrence: None,
             online_meeting: None,
+            meeting_request_id: None,
         }
     }
 
@@ -520,6 +538,13 @@ mod tests {
         let g = google_body(&EventChanges { online_meeting: Some("hangoutsMeet".into()), ..Default::default() });
         assert_eq!(g["conferenceData"]["createRequest"]["conferenceSolutionKey"]["type"], "hangoutsMeet");
         assert!(g["conferenceData"]["createRequest"]["requestId"].as_str().is_some_and(|id| !id.is_empty()));
+        // Queued once, sent as often as it takes: every send asks for the same meeting.
+        let mut queued = EventChanges { online_meeting: Some("hangoutsMeet".into()), ..Default::default() };
+        queued.stamp_meeting_request();
+        let replay: EventChanges = serde_json::from_str(&serde_json::to_string(&queued).unwrap()).unwrap();
+        let id = |c: &EventChanges| google_body(c)["conferenceData"]["createRequest"]["requestId"].clone();
+        assert_eq!(id(&queued), id(&replay));
+        assert_eq!(id(&replay), json!(queued.meeting_request_id.unwrap()));
         assert!(graph_body(&changes(), "UTC").get("isOnlineMeeting").is_none(), "only when asked");
         assert!(google_body(&changes()).get("conferenceData").is_none());
     }
@@ -530,7 +555,8 @@ mod tests {
         assert_eq!(pick_meeting_provider(&cal(json!(["teamsForBusiness"]), "teamsForBusiness")).as_deref(), Some("teamsForBusiness"));
         // A default it doesn't allow (or none) falls back to what's allowed, Teams first.
         assert_eq!(pick_meeting_provider(&cal(json!(["skypeForBusiness", "teamsForBusiness"]), "unknown")).as_deref(), Some("teamsForBusiness"));
-        assert_eq!(pick_meeting_provider(&cal(json!(["skypeForConsumer"]), "teamsForBusiness")).as_deref(), Some("skypeForConsumer"));
+        assert_eq!(pick_meeting_provider(&cal(json!(["skypeForBusiness"]), "teamsForBusiness")).as_deref(), Some("skypeForBusiness"));
+        assert_eq!(pick_meeting_provider(&cal(json!(["skypeForConsumer"]), "skypeForConsumer")), None, "retired");
         assert_eq!(pick_meeting_provider(&cal(json!(["unknown"]), "unknown")), None);
         assert_eq!(pick_meeting_provider(&json!({})), None);
     }
@@ -548,6 +574,14 @@ mod tests {
         let mut meet = g.clone();
         meet["hangoutLink"] = json!("https://meet.google.com/abc-defg-hij");
         assert!(from_google(&meet, false, "UTC").unwrap().online_meeting);
+        // Still being made counts; a request Google couldn't fulfil doesn't, so it can be tried again.
+        let with_status = |code: &str| {
+            let mut e = g.clone();
+            e["conferenceData"] = json!({ "createRequest": { "requestId": "r", "status": { "statusCode": code } } });
+            from_google(&e, false, "UTC").unwrap().online_meeting
+        };
+        assert!(with_status("pending"));
+        assert!(!with_status("failure"));
     }
 
     #[test]

@@ -96,8 +96,10 @@ class CalendarStore {
     } else if (this.day.getTime() === was.getTime()) {
       this.goToDay(today);
     }
-    const oldWeek = startOfWeek(was, this.weekStartsOn).getTime();
-    if (this.weekStart.getTime() === oldWeek && startOfWeek(today, this.weekStartsOn).getTime() !== oldWeek) this.showWeekOf(today);
+    // Compared as instants, not recomputed: after a time zone change, "was" and the week on
+    // screen are both midnights in the old zone, and the week is rebuilt in the new one.
+    const showedToday = this.weekStart.getTime() <= was.getTime() && was.getTime() < addDays(this.weekStart, 7).getTime();
+    if (showedToday && this.weekStart.getTime() !== startOfWeek(today, this.weekStartsOn).getTime()) this.showWeekOf(today);
   }
 
   /** Checks for a new day every half minute and whenever the window comes back. Returns a stop function. */
@@ -120,7 +122,7 @@ class CalendarStore {
   /** Applies the week-start preference, keeping the same week on screen. */
   setWeekStartsOn(day: number) {
     if (day === this.weekStartsOn) return;
-    const anchor = this.isThisWeek ? new Date() : this.weekStart;
+    const anchor = this.isThisWeek ? this.todayStart : this.weekStart;
     this.weekStartsOn = day;
     this.weekStart = startOfWeek(anchor, day);
     return this.loadWeek();
