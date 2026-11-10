@@ -243,7 +243,8 @@ fn google_status(r: Rsvp) -> &'static str {
 
 pub async fn execute(state: &AppState, account_id: i64, remote_id: Option<&str>, op: &Op) -> Result<Value> {
     match op {
-        Op::CreateEvent(e) => call(state, account_id, Method::POST, &events_url(), Some(&create_body(e))).await,
+        // conferenceDataVersion=1: without it Google ignores a Meet request.
+        Op::CreateEvent(e) => call(state, account_id, Method::POST, &format!("{}?conferenceDataVersion=1", events_url()), Some(&create_body(e))).await,
         Op::Respond { response } => {
             let id = remote_id.ok_or_else(|| AppError::Other("RSVP has no event".into()))?;
             let url = format!("{}/{id}", events_url());
@@ -259,7 +260,7 @@ pub async fn execute(state: &AppState, account_id: i64, remote_id: Option<&str>,
         Op::UpdateEvent { changes } => {
             let id = remote_id.ok_or_else(|| AppError::Other("edit has no event".into()))?;
             // Guests hear about it (Google sends nothing for events without any).
-            let url = format!("{}/{id}?sendUpdates=all", events_url());
+            let url = format!("{}/{id}?sendUpdates=all&conferenceDataVersion=1", events_url());
             call(state, account_id, Method::PATCH, &url, Some(&crate::event_edit::google_body(changes))).await
         }
         Op::DeleteEvent { cancel, .. } => {
@@ -406,7 +407,12 @@ pub async fn invite_for_message(state: &AppState, message_id: i64, account_id: i
     let Some(ics) = ics else { return Ok(None) };
     let url = url::Url::parse_with_params(&events_url(), &[("iCalUID", ics.uid.as_str())]).expect("valid url").to_string();
     let found = call(state, account_id, Method::GET, &url, None).await?;
-    let Some(parsed) = found["items"].as_array().and_then(|i| i.first()).and_then(parse_event) else { return Ok(None) };
+    let Some(item) = found["items"].as_array().and_then(|i| i.first()) else { return Ok(None) };
+    let Some(parsed) = parse_event(item) else { return Ok(None) };
+    // Google's start is the series' first day in its own zone (dateTime carries the offset).
+    let first_day = item.pointer("/start/dateTime").or_else(|| item.pointer("/start/date")).and_then(Value::as_str).and_then(|s| s.get(..10));
+    let lines: Option<Vec<String>> = item["recurrence"].as_array().map(|a| a.iter().filter_map(|l| l.as_str().map(String::from)).collect());
+    let recurrence = lines.zip(first_day).and_then(|(l, d)| crate::recurrence::from_rrule(&l, d));
     let event = state.db.with(|c| {
         let busy = crate::outbox::busy_remote_ids(c, account_id)?;
         if !busy.contains(&parsed.remote_id) || calendar::event_by_remote(c, account_id, &parsed.remote_id)?.is_none() {
@@ -420,6 +426,7 @@ pub async fn invite_for_message(state: &AppState, message_id: i64, account_id: i
         previous_start: None,
         previous_end: None,
         previous_location: None,
+        recurrence,
         event,
     }))
 }

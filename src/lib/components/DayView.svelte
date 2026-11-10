@@ -26,7 +26,7 @@
   const nowTop = $derived(((now.getTime() - calendar.day.getTime()) / 3_600_000) * HOUR);
 
   const dayLabel = $derived.by(() => {
-    const diff = Math.round((calendar.day.getTime() - new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()) / 86_400_000);
+    const diff = Math.round((calendar.day.getTime() - calendar.todayStart.getTime()) / 86_400_000);
     const date = calendar.day.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
     return diff === 0 ? `Today · ${date}` : diff === 1 ? `Tomorrow · ${date}` : diff === -1 ? `Yesterday · ${date}` : date;
   });
@@ -56,7 +56,14 @@
     scrollToWorkday();
   });
 
-  const focused = (e: CalendarEvent) => calendar.focus?.remoteId === e.remoteId;
+  // A recurring invite focuses the series master: its occurrence is the one to highlight.
+  const focused = (e: CalendarEvent) => !!calendar.focus && (calendar.focus.remoteId === e.remoteId || calendar.focus.remoteId === e.seriesMasterId);
+
+  // A new day: the now-line moves at once, not on the next minute's tick.
+  $effect(() => {
+    calendar.todayStart;
+    now = new Date();
+  });
 
   onMount(() => {
     calendar.load();

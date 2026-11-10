@@ -12,6 +12,10 @@ Unreleased into that version's section when cutting a stable release.
 
 ## Unreleased
 
+- Invitations to recurring meetings now show the RSVP card, with when the series starts and how it repeats. Answering covers the whole series.
+- If an invitation's meeting details can't be loaded, PeetMail now tells you instead of leaving the RSVP card out without a word.
+- New and existing events can get a Teams meeting (Google Meet on Google calendars): tick **Teams meeting** in the event editor or press **Ctrl+M**, and the join link is added when you save.
+- The calendar follows the date: a day or week view left on today moves to the new day after midnight, or when you come back to your PC on a later day.
 - Your settings can follow you between PCs: splits, snippets, signatures and preferences sync through a server you or your organisation runs, encrypted on your PC first so the server can't read them. Turn it on under **Settings → Sync**; see Help (**F1**) → Syncing settings.
 - With settings sync on, an account you add on one PC is offered on your others (**Settings → Accounts → On your other PCs**), and signing an account out asks whether it's for this PC only or everywhere.
 

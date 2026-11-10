@@ -309,6 +309,8 @@ export const api = {
     invoke<CalendarEvent[]>("list_events", { from, to, fromDate, toDate }),
   inviteEvent: (messageId: number) => invoke<Invite | null>("invite_event", { messageId }),
   listRooms: (accountId: number) => invoke<RoomList>("list_rooms", { accountId }),
+  /** The online meeting new events on this account can have ("teamsForBusiness", "hangoutsMeet"...), or null. */
+  meetingProvider: (accountId: number) => invoke<string | null>("meeting_provider", { accountId }),
   /** Sign a known account in again in place (new tokens, optionally extra permissions); keeps its mail. */
   reconnectAccount: (accountId: number, addScopes?: string[]) => invoke<Account>("reconnect_account", { accountId, addScopes: addScopes ?? null }),
   createEvent: (accountId: number, event: NewEvent) => invoke<CalendarEvent>("create_event", { accountId, event }),
@@ -456,6 +458,8 @@ export type EventChanges = {
   sensitivity?: "normal" | "private";
   /** null stops it repeating. */
   recurrence?: Recurrence | null;
+  /** Adds an online meeting from this provider (see `meetingProvider`). */
+  onlineMeeting?: string;
 };
 /** The event the editor works on (fresh from the server). */
 export type EditableEvent = {
@@ -471,6 +475,8 @@ export type EditableEvent = {
   reminderDefault: boolean;
   sensitivity: "normal" | "private";
   recurrence: Recurrence | null;
+  /** It already has an online meeting (Teams, Meet...). */
+  onlineMeeting: boolean;
   isOrganizer: boolean;
   series: boolean;
 };
@@ -483,6 +489,8 @@ export type Invite = {
   previousStart: string | null;
   previousEnd: string | null;
   previousLocation: string | null;
+  /** How the series repeats; `event` is then the series master (its first occurrence's times). */
+  recurrence: Recurrence | null;
   event: CalendarEvent;
 };
 

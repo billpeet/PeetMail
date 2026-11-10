@@ -82,6 +82,10 @@ pub struct EventChanges {
     /// Some(None) stops it repeating.
     #[serde(default, with = "double_option", skip_serializing_if = "Option::is_none")]
     pub recurrence: Option<Option<Recurrence>>,
+    /// Adds an online meeting from this provider (Graph's onlineMeetingProvider, e.g.
+    /// teamsForBusiness; "hangoutsMeet" for Google). Once added it can't be taken off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub online_meeting: Option<String>,
 }
 
 /// Distinguishes "recurrence": null (stop repeating) from a missing field (unchanged).
@@ -124,6 +128,8 @@ pub struct EditableEvent {
     pub sensitivity: String,
     /// The series' pattern when editing the series.
     pub recurrence: Option<Recurrence>,
+    /// It already has an online meeting (Teams, Meet...).
+    pub online_meeting: bool,
     /// You organise it (or it's your own event): every field is yours to change.
     pub is_organizer: bool,
     /// Editing the whole series (not one occurrence).
@@ -194,6 +200,10 @@ pub fn graph_body(c: &EventChanges, time_zone: &str) -> Value {
         let tz = c.times.as_ref().map(|t| t.time_zone.as_str()).unwrap_or(time_zone);
         b.insert("recurrence".into(), r.as_ref().map(|r| recurrence::to_graph(r, tz)).unwrap_or(Value::Null));
     }
+    if let Some(provider) = &c.online_meeting {
+        b.insert("isOnlineMeeting".into(), json!(true));
+        b.insert("onlineMeetingProvider".into(), json!(provider));
+    }
     Value::Object(b)
 }
 
@@ -241,6 +251,7 @@ pub fn from_graph(v: &Value, series: bool, local_zone: &str) -> Option<EditableE
         reminder_default: false,
         sensitivity: if v["sensitivity"] == "private" { "private".into() } else { "normal".into() },
         recurrence: v.get("recurrence").filter(|r| !r.is_null()).and_then(recurrence::from_graph),
+        online_meeting: v["isOnlineMeeting"].as_bool().unwrap_or(false) || v.pointer("/onlineMeeting/joinUrl").and_then(Value::as_str).is_some(),
         is_organizer: v["isOrganizer"].as_bool().unwrap_or(true),
         series,
     })
@@ -311,6 +322,11 @@ pub fn google_body(c: &EventChanges) -> Value {
     if let Some(r) = &c.recurrence {
         b.insert("recurrence".into(), json!(r.as_ref().map(|r| vec![recurrence::to_rrule(r)]).unwrap_or_default()));
     }
+    if c.online_meeting.is_some() {
+        // Only honoured with conferenceDataVersion=1 on the request (gcal::execute adds it).
+        let request_id = format!("peetmail-{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default());
+        b.insert("conferenceData".into(), json!({ "createRequest": { "requestId": request_id, "conferenceSolutionKey": { "type": "hangoutsMeet" } } }));
+    }
     Value::Object(b)
 }
 
@@ -360,6 +376,7 @@ pub fn from_google(v: &Value, series: bool, local_zone: &str) -> Option<Editable
         reminder_default: use_default,
         sensitivity: if matches!(s("/visibility").as_deref(), Some("private" | "confidential")) { "private".into() } else { "normal".into() },
         recurrence: lines.and_then(|l| recurrence::from_rrule(&l, &start_date)),
+        online_meeting: v.get("conferenceData").is_some_and(|c| !c.is_null()) || v.get("hangoutLink").is_some_and(|l| l.is_string()),
         // Google marks your own events with organizer.self; events without an organizer are yours.
         is_organizer: v.pointer("/organizer/self").and_then(Value::as_bool).unwrap_or(v.get("organizer").is_none()),
         series,
@@ -396,6 +413,30 @@ pub async fn load(state: &AppState, account_id: i64, remote_id: &str, series: bo
     };
     let parsed = if google { from_google(&v, series, local_zone) } else { from_graph(&v, series, local_zone) };
     parsed.ok_or_else(|| AppError::Other("couldn't read that event".into()))
+}
+
+// ---------- online meetings ----------
+
+/// Which online meeting a new event can get from this calendar (`GET /me/calendar` with
+/// allowed/defaultOnlineMeetingProvider): its default when that's allowed, else the first
+/// allowed one, Teams before Skype. None when it offers none.
+pub fn pick_meeting_provider(calendar: &Value) -> Option<String> {
+    let allowed: Vec<&str> = calendar["allowedOnlineMeetingProviders"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|p| *p != "unknown").collect();
+    if let Some(d) = calendar["defaultOnlineMeetingProvider"].as_str().filter(|d| allowed.contains(d)) {
+        return Some(d.to_string());
+    }
+    ["teamsForBusiness", "skypeForBusiness", "skypeForConsumer"].into_iter().find(|p| allowed.contains(p)).or(allowed.first().copied()).map(String::from)
+}
+
+/// The online meeting the editor offers for this account: Google Meet for Google, else
+/// what the Outlook calendar allows (Teams for work accounts).
+pub async fn meeting_provider(state: &AppState, account_id: i64) -> Result<Option<String>> {
+    if state.db.with(|c| crate::db::account_provider(c, account_id))? == "google" {
+        return Ok(Some("hangoutsMeet".into()));
+    }
+    let url = format!("{}/me/calendar?$select=allowedOnlineMeetingProviders,defaultOnlineMeetingProvider", crate::graph::base());
+    let v = crate::mail::graph_call(state, account_id, reqwest::Method::GET, &url, None, &[]).await?;
+    Ok(pick_meeting_provider(&v))
 }
 
 // ---------- local copy ----------
@@ -468,7 +509,45 @@ mod tests {
             reminder: Some(Reminder { minutes: Some(30) }),
             sensitivity: Some("private".into()),
             recurrence: None,
+            online_meeting: None,
         }
+    }
+
+    #[test]
+    fn an_online_meeting_asks_graph_for_teams_and_google_for_meet() {
+        let c = EventChanges { online_meeting: Some("teamsForBusiness".into()), ..Default::default() };
+        assert_eq!(graph_body(&c, "UTC"), json!({ "isOnlineMeeting": true, "onlineMeetingProvider": "teamsForBusiness" }));
+        let g = google_body(&EventChanges { online_meeting: Some("hangoutsMeet".into()), ..Default::default() });
+        assert_eq!(g["conferenceData"]["createRequest"]["conferenceSolutionKey"]["type"], "hangoutsMeet");
+        assert!(g["conferenceData"]["createRequest"]["requestId"].as_str().is_some_and(|id| !id.is_empty()));
+        assert!(graph_body(&changes(), "UTC").get("isOnlineMeeting").is_none(), "only when asked");
+        assert!(google_body(&changes()).get("conferenceData").is_none());
+    }
+
+    #[test]
+    fn picks_the_calendars_meeting_provider() {
+        let cal = |allowed: Value, default: &str| json!({ "allowedOnlineMeetingProviders": allowed, "defaultOnlineMeetingProvider": default });
+        assert_eq!(pick_meeting_provider(&cal(json!(["teamsForBusiness"]), "teamsForBusiness")).as_deref(), Some("teamsForBusiness"));
+        // A default it doesn't allow (or none) falls back to what's allowed, Teams first.
+        assert_eq!(pick_meeting_provider(&cal(json!(["skypeForBusiness", "teamsForBusiness"]), "unknown")).as_deref(), Some("teamsForBusiness"));
+        assert_eq!(pick_meeting_provider(&cal(json!(["skypeForConsumer"]), "teamsForBusiness")).as_deref(), Some("skypeForConsumer"));
+        assert_eq!(pick_meeting_provider(&cal(json!(["unknown"]), "unknown")), None);
+        assert_eq!(pick_meeting_provider(&json!({})), None);
+    }
+
+    #[test]
+    fn the_editor_knows_when_an_event_already_has_an_online_meeting() {
+        let base = json!({ "id": "e", "subject": "s", "isAllDay": false,
+            "start": { "dateTime": "2026-10-30T02:00:00.0000000" }, "end": { "dateTime": "2026-10-30T03:00:00.0000000" } });
+        assert!(!from_graph(&base, false, "UTC").unwrap().online_meeting);
+        let mut teams = base.clone();
+        teams["isOnlineMeeting"] = json!(true);
+        assert!(from_graph(&teams, false, "UTC").unwrap().online_meeting);
+        let g = json!({ "id": "g", "summary": "s", "start": { "dateTime": "2026-10-30T02:00:00Z" }, "end": { "dateTime": "2026-10-30T03:00:00Z" } });
+        assert!(!from_google(&g, false, "UTC").unwrap().online_meeting);
+        let mut meet = g.clone();
+        meet["hangoutLink"] = json!("https://meet.google.com/abc-defg-hij");
+        assert!(from_google(&meet, false, "UTC").unwrap().online_meeting);
     }
 
     #[test]

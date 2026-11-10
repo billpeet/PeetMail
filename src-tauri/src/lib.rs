@@ -441,6 +441,7 @@ pub fn run() {
             commands::event_detail,
             commands::event_for_edit,
             commands::list_rooms,
+            commands::meeting_provider,
             commands::reconnect_account,
             commands::update_event,
             commands::delete_calendar_event,

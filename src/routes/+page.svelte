@@ -136,6 +136,7 @@
       onMailChanged(() => mail.scheduleRefresh()),
       onSyncStatus((s) => (mail.sync = s)),
       onCalendarChanged(() => calendar.refresh()),
+      Promise.resolve(calendar.watchDate()),
       updates.init(),
       health.init(),
       onScheduledChanged(() => mail.refreshScheduled()),

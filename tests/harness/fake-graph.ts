@@ -97,6 +97,10 @@ export type FakeConfig = {
   latencyMs: number;
   /** Message body requests return 500. */
   failBody: boolean;
+  /** Invite lookups (a message with its event expanded) return 500. */
+  failInvite: boolean;
+  /** What GET /me/calendar says about online meetings. */
+  meetingProviders: { allowedOnlineMeetingProviders: string[]; defaultOnlineMeetingProvider: string };
   /** Every write (PATCH, move, send) fails with this status; 0 = off. */
   failWrites: number;
   /** The next N writes get their connection cut with no response, like a dropped socket. */
@@ -141,7 +145,7 @@ export async function startFakeGraph({ port = 0, mailbox, count, seed, verbose =
     authorizations: [] as Record<string, string>[],
     refreshTokens: new Set<string>(),
     throttle: [] as { status: number; retryAfter: number }[],
-    config: { rejectDeltaFilter: false, expireDelta: false, tokenTtl: 3600, latencyMs: 0, failBody: false, failWrites: 0, dropWrites: 0, expireCalendarDelta: false, omitODataType: false, rejectMeetingSelect: false, failAttachments: 0, dropSendResponse: 0 } as FakeConfig,
+    config: { rejectDeltaFilter: false, expireDelta: false, tokenTtl: 3600, latencyMs: 0, failBody: false, failInvite: false, meetingProviders: { allowedOnlineMeetingProviders: ["teamsForBusiness"], defaultOnlineMeetingProvider: "teamsForBusiness" }, failWrites: 0, dropWrites: 0, expireCalendarDelta: false, omitODataType: false, rejectMeetingSelect: false, failAttachments: 0, dropSendResponse: 0 } as FakeConfig,
     requests: [] as RequestRecord[],
     events: new Map<string, GraphEvent>(),
     eventSeq: 0,
@@ -455,6 +459,11 @@ export async function startFakeGraph({ port = 0, mailbox, count, seed, verbose =
       return reply(202, "");
     }
 
+    // The calendar's online meeting providers (the editor's Teams toggle).
+    if (p === "/me/calendar" && method === "GET") {
+      return reply(200, { id: "cal-default", ...state.config.meetingProviders });
+    }
+
     if (p === "/me/events" && method === "POST") {
       const b = await readBody(req);
       if (!b.subject || !b.start?.dateTime || !b.end?.dateTime) return graphError(reply, 400, "ErrorInvalidRequest", "subject, start and end are required");
@@ -480,6 +489,7 @@ export async function startFakeGraph({ port = 0, mailbox, count, seed, verbose =
         e.recurrence = b.recurrence;
         e.type = "seriesMaster";
       }
+      addOnlineMeeting(e, b);
       state.events.set(e.id, e);
       eventChange(e.id);
       state.sent.push({ kind: "create-event", id: e.id, body: b });
@@ -511,6 +521,7 @@ export async function startFakeGraph({ port = 0, mailbox, count, seed, verbose =
       if (end) e.end = utc(end);
       if (attendees) e.attendees = attendees.map((a: any) => ({ emailAddress: a.emailAddress, status: { response: "none" }, type: a.type ?? "required" }));
       if (b.recurrence === null) delete e.recurrence;
+      addOnlineMeeting(e, b);
       if (e.type === "occurrence" && (start || end || b.subject)) e.type = "exception";
       e.bare = false;
       eventChange(e.id);
@@ -609,6 +620,7 @@ export async function startFakeGraph({ port = 0, mailbox, count, seed, verbose =
         return reply(200, metadata(msg));
       }
       if ((url.searchParams.get("$expand") ?? "").includes("eventMessage/event")) {
+        if (state.config.failInvite) return graphError(reply, 500, "InternalServerError", "Invite lookup failed (test)");
         const event = msg.eventId ? state.events.get(msg.eventId) : undefined;
         return reply(200, {
           id: msg.id,
@@ -860,6 +872,16 @@ export async function startFakeGraph({ port = 0, mailbox, count, seed, verbose =
     }
   }
 
+  /** isOnlineMeeting: Graph creates the meeting and its join link (once; it can't be removed). */
+  function addOnlineMeeting(e: GraphEvent, b: Json) {
+    if (!b.isOnlineMeeting || (e as Json).onlineMeeting) return;
+    Object.assign(e, {
+      isOnlineMeeting: true,
+      onlineMeetingProvider: b.onlineMeetingProvider ?? "teamsForBusiness",
+      onlineMeeting: { joinUrl: `https://teams.microsoft.com/l/meetup-join/${e.id}` },
+    });
+  }
+
   /** How calendarView delta presents an event: occurrences bare, everything else in full. */
   function deltaForm(e: GraphEvent): Json {
     if (e.bare) return { id: e.id, type: e.type, ...(e.seriesMasterId ? { seriesMasterId: e.seriesMasterId } : {}), start: e.start, end: e.end };
@@ -978,7 +1000,7 @@ export async function startFakeGraph({ port = 0, mailbox, count, seed, verbose =
             "POST /_test/draft {subject?, html?, to?: [address], bcc?, attachments?: [{name, text}]}   POST /_test/draft-update {id, subject?, html?}   POST /_test/draft-remove {id}",
             "POST /_test/throttle {count?=1, status?=429, retryAfter?=1}",
             "POST /_test/move {id, folder: inbox|archive|deleteditems|junkemail|sentitems}",
-            "POST /_test/config {rejectDeltaFilter?, expireDelta?, tokenTtl?, latencyMs?, failBody?, failWrites?: status, dropWrites?: count}",
+            "POST /_test/config {rejectDeltaFilter?, expireDelta?, tokenTtl?, latencyMs?, failBody?, failInvite?, failWrites?: status, dropWrites?: count}",
             "GET  /_test/sent   (writes the app made: send, reply, move, patch, rsvp, event)",
             "POST /_test/event {id, subject?, start?, end? (ISO), allDay?, location?, response?, attendees?: [[name, address]]}   POST /_test/event-remove {id}   GET /_test/event?id=",
             "GET  /_test/message?id=...",
@@ -1009,6 +1031,12 @@ export async function startFakeGraph({ port = 0, mailbox, count, seed, verbose =
           });
           if (body.cc) msg.ccRecipients = (body.cc as Sender[]).map(([name, address]) => ({ emailAddress: { name, address } }));
           if (body.inference) msg.inferenceClassification = body.inference;
+          // A meeting request for an existing event (see POST /_test/event).
+          if (body.eventId) {
+            msg["@odata.type"] = "#microsoft.graph.eventMessageRequest";
+            msg.eventId = body.eventId;
+            msg.meetingMessageType = "meetingRequest";
+          }
           if (body.body) msg.body = { contentType: "html", content: body.body };
           if (body.attachments) {
             msg.attachments = (body.attachments as { name: string; contentType?: string; text: string }[]).map((a, n) => {
@@ -1040,7 +1068,9 @@ export async function startFakeGraph({ port = 0, mailbox, count, seed, verbose =
         return ok();
       }
       case "POST /_test/event": {
-        // Create or update an event: {id, subject, start, end (ISO), allDay?, location?, response?}
+        // Create or update an event: {id, subject, start, end (ISO), allDay?, location?, response?,
+        // organizer? [name, address], recurrence? (Graph shape; makes it a series master),
+        // seriesMasterId? (makes it a bare occurrence of that master)}
         const existing = state.events.get(body.id);
         const e = makeEvent({
           id: body.id,
@@ -1051,6 +1081,12 @@ export async function startFakeGraph({ port = 0, mailbox, count, seed, verbose =
           location: body.location,
           response: body.response,
           attendees: (body.attendees as [string, string][] | undefined)?.map(([name, address]) => ({ name, address })),
+          organizer: body.organizer ? { name: body.organizer[0], address: body.organizer[1] } : undefined,
+          recurrence: body.recurrence,
+          type: body.recurrence ? "seriesMaster" : undefined,
+          // An occurrence: delta sends it bare, its details live on the master.
+          seriesMasterId: body.seriesMasterId,
+          bare: !!body.seriesMasterId,
         });
         state.events.set(e.id, e);
         eventChange(e.id);

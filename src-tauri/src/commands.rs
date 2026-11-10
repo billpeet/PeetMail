@@ -1281,6 +1281,13 @@ pub fn delete_calendar_event(
     Ok(())
 }
 
+/// The online meeting a new event on this account can have ("teamsForBusiness",
+/// "hangoutsMeet"...), or None.
+#[tauri::command]
+pub async fn meeting_provider(state: State<'_, AppState>, account_id: i64) -> Result<Option<String>> {
+    crate::event_edit::meeting_provider(&state, account_id).await
+}
+
 /// Meeting rooms of a Microsoft 365 account (location suggestions); none for others.
 #[tauri::command]
 pub async fn list_rooms(state: State<'_, AppState>, account_id: i64) -> Result<crate::rooms::RoomList> {

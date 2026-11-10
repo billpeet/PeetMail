@@ -257,6 +257,8 @@ class MailStore {
   /** The meeting invite in the open conversation, if any (for the RSVP card and y/m/n). */
   invite = $state.raw<Invite | null>(null);
   #inviteSeq = 0;
+  /** The invite message whose lookup last failed: list refreshes retry it without toasting again. */
+  #inviteFailed: number | null = null;
   /** Remote images allowed for the open conversation. */
   imagesFor = $state<string | null>(null);
 
@@ -1103,14 +1105,17 @@ class MailStore {
     try {
       const invite = await api.inviteEvent(msg.id);
       if (seq !== this.#inviteSeq) return;
+      this.#inviteFailed = null;
       this.invite = invite;
       // Show the meeting in the calendar sidebar, among everything else that day.
       if (invite) calendar.showInContext(invite.event);
       else calendar.clearContext();
-    } catch {
+    } catch (e) {
       if (seq === this.#inviteSeq) {
         this.invite = null;
         calendar.clearContext();
+        if (this.#inviteFailed !== msg.id) this.showToast({ text: `Couldn't load the meeting details: ${e}`, error: true });
+        this.#inviteFailed = msg.id;
       }
     }
   }

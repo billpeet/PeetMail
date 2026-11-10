@@ -521,3 +521,62 @@ test("a single event can be made to repeat", async ({ inbox: page, fake }) => {
   await openEditor(page, "evt-lunch");
   await expect(page.getByTestId("editor-repeat-select")).toHaveValue("weekdays");
 });
+
+test("a new meeting gets a Teams link: Ctrl+M ticks it, and the event comes back with a join link", async ({ inbox: page, fake }, testInfo) => {
+  await page.keyboard.press("Shift+C");
+  await page.getByTestId("quick-add-input").fill("Estimating catch up tomorrow 10am");
+  await page.keyboard.press("Tab");
+  await expect(page.getByTestId("event-editor")).toBeVisible();
+  const online = page.getByTestId("editor-online-meeting");
+  await expect(online).not.toBeChecked();
+  await expect(online.locator("xpath=..")).toContainText("Teams meeting");
+  await page.keyboard.press("Control+m");
+  await expect(online).toBeChecked();
+  await expect(page.getByTestId("editor-online-note")).toBeVisible();
+  await snap(page, testInfo, "editor-teams");
+  await page.keyboard.press("Control+Enter");
+  await expect.poll(() => sentOf(fake, "create-event").length, { timeout: 10_000 }).toBe(1);
+  const b = sentOf(fake, "create-event")[0].body;
+  expect([b.isOnlineMeeting, b.onlineMeetingProvider]).toEqual([true, "teamsForBusiness"]);
+
+  // Synced back, it has Teams' join link.
+  const id = sentOf(fake, "create-event")[0].id;
+  await page.keyboard.press("Control+r");
+  await expect(event(page, id)).toBeVisible({ timeout: 10_000 });
+  await event(page, id).click();
+  await expect(page.getByTestId("event-join-link")).toContainText("Teams");
+});
+
+test("an existing event can get a Teams link, and then shows it has one", async ({ inbox: page, fake }) => {
+  await openEditor(page, "evt-lunch");
+  await page.getByTestId("editor-online-meeting").check();
+  await page.keyboard.press("Control+Enter");
+  await expect.poll(() => sentOf(fake, "update-event").length, { timeout: 10_000 }).toBe(1);
+  expect(sentOf(fake, "update-event")[0].body).toEqual({ isOnlineMeeting: true, onlineMeetingProvider: "teamsForBusiness" });
+
+  await expect(page.getByTestId("event-editor")).toHaveCount(0);
+  await openEditor(page, "evt-lunch");
+  const online = page.getByTestId("editor-online-meeting");
+  await expect(online).toBeChecked();
+  await expect(online).toBeDisabled();
+  await expect(online.locator("xpath=..")).toContainText("Has an online meeting");
+});
+
+test("a calendar that offers no online meetings shows no toggle; one that offers Skype says so", async ({ inbox: page, fake }) => {
+  await fake.control("config", { meetingProviders: { allowedOnlineMeetingProviders: [], defaultOnlineMeetingProvider: "unknown" } });
+  await page.keyboard.press("Shift+C");
+  await page.getByTestId("quick-add-input").fill("Coffee tomorrow 3pm");
+  await page.keyboard.press("Tab");
+  await expect(page.getByTestId("event-editor")).toBeVisible();
+  await page.waitForTimeout(500);
+  await expect(page.getByTestId("editor-online-meeting")).toHaveCount(0);
+  await page.getByTestId("editor-cancel").click();
+  await page.getByTestId("editor-cancel").click();
+  await expect(page.getByTestId("event-editor")).toHaveCount(0);
+
+  await fake.control("config", { meetingProviders: { allowedOnlineMeetingProviders: ["skypeForConsumer"], defaultOnlineMeetingProvider: "skypeForConsumer" } });
+  await page.keyboard.press("Shift+C");
+  await page.getByTestId("quick-add-input").fill("Coffee tomorrow 3pm");
+  await page.keyboard.press("Tab");
+  await expect(page.getByTestId("editor-online-meeting").locator("xpath=..")).toContainText("Skype meeting");
+});
