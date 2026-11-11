@@ -275,6 +275,8 @@ export async function startFakeGmail({ mailbox, extra = 0 }: { mailbox?: FakeGma
       failQuotaNext: 0,
       /** message id -> how many more GETs of it fail with 500. */
       failIds: {} as Record<string, number>,
+      /** The primary calendar's conferenceProperties.allowedConferenceSolutionTypes. */
+      conferenceTypes: ["hangoutsMeet"] as string[],
     },
     usage: [] as { at: number; cost: number }[],
     quotaErrors: 0,
@@ -586,6 +588,9 @@ export async function startFakeGmail({ mailbox, extra = 0 }: { mailbox?: FakeGma
     if (!state.tokens.has(token)) return reply(401, err(401, "Request had invalid authentication credentials."));
     if (!state.grantCalendar) return reply(403, { error: { code: 403, message: "Request had insufficient authentication scopes.", errors: [{ reason: "insufficientPermissions" }], status: "PERMISSION_DENIED" } });
     const method = req.method ?? "GET";
+    if (url.pathname === "/calendar/v3/calendars/primary" && method === "GET") {
+      return reply(200, { kind: "calendar#calendar", id: "primary", conferenceProperties: { allowedConferenceSolutionTypes: state.config.conferenceTypes } });
+    }
     const rest = url.pathname.slice("/calendar/v3/calendars/primary/events".length);
     const q = url.searchParams;
     if (rest === "" && method === "GET") {
@@ -610,10 +615,18 @@ export async function startFakeGmail({ mailbox, extra = 0 }: { mailbox?: FakeGma
       const items = [...state.events.values()].filter((e) => !e.recurrence && e.status !== "cancelled" && startOf(e) < max && endOf(e) > min);
       return reply(200, { kind: "calendar#events", items, nextSyncToken: String(state.eventSeq) });
     }
+    // Like Google: a conference request is only acted on with conferenceDataVersion=1, else dropped.
+    const conference = (b: Json): Json => {
+      if (!b.conferenceData) return b;
+      const { conferenceData, ...rest } = b;
+      if (q.get("conferenceDataVersion") !== "1") return rest;
+      const link = `https://meet.google.com/fak-${String(conferenceData.createRequest?.requestId ?? "").slice(-4)}`;
+      return { ...rest, hangoutLink: link, conferenceData: { ...conferenceData, entryPoints: [{ entryPointType: "video", uri: link }] } };
+    };
     if (rest === "" && method === "POST") {
       const b = await readBody(req);
       const id = `gcal-created-${state.events.size + 1}`;
-      const ev = { kind: "calendar#event", id, status: "confirmed", iCalUID: `${id}@google.com`, organizer: me, htmlLink: `https://calendar.google.com/${id}`, ...b };
+      const ev = { kind: "calendar#event", id, status: "confirmed", iCalUID: `${id}@google.com`, organizer: me, htmlLink: `https://calendar.google.com/${id}`, ...conference(b) };
       state.events.set(id, ev);
       touchEvent(id);
       state.sent.push({ kind: "create-event", id, body: b });
@@ -625,7 +638,7 @@ export async function startFakeGmail({ mailbox, extra = 0 }: { mailbox?: FakeGma
     if (one && method === "GET") return reply(200, ev);
     if (one && method === "PATCH") {
       const b = await readBody(req);
-      Object.assign(ev!, b);
+      Object.assign(ev!, conference(b));
       touchEvent(ev!.id);
       // Only your answer changed: an RSVP. Anything else: an edit.
       const rsvp = Object.keys(b).length === 1 && "attendees" in b;

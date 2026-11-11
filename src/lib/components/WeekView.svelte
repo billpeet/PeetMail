@@ -3,7 +3,7 @@
   // and a now-line in today's column. ←/→ change week, t jumps to today, Esc goes back.
   import { onMount, tick } from "svelte";
   import { ArrowLeft, ChevronLeft, ChevronRight, Plus } from "@lucide/svelte";
-  import { addDays, calendar, eventTimes, startOfDay } from "#lib/calendar.svelte.js";
+  import { addDays, calendar, eventTimes } from "#lib/calendar.svelte.js";
   import { layoutDay } from "#lib/eventLayout.js";
   import { eventTone, TONE_CLASSES } from "#lib/eventTone.js";
   import { mail } from "#lib/mail.svelte.js";
@@ -15,7 +15,12 @@
   let now = $state(new Date());
 
   const days = $derived(Array.from({ length: 7 }, (_, i) => addDays(calendar.weekStart, i)));
-  const todayMs = $derived(startOfDay(now).getTime());
+  const todayMs = $derived(calendar.todayStart.getTime());
+  // A new day: today's column and the now-line move at once, not on the next minute's tick.
+  $effect(() => {
+    calendar.todayStart;
+    now = new Date();
+  });
 
   const timedByDay = $derived(
     days.map((d) =>
@@ -63,7 +68,11 @@
   onMount(() => {
     calendar.loadWeek();
     tick().then(() => scroller && (scroller.scrollTop = 7 * HOUR));
-    const timer = setInterval(() => (now = new Date()), 60_000);
+    // The minute tick checks the date too, so "now" and "today" never disagree past midnight.
+    const timer = setInterval(() => {
+      now = new Date();
+      calendar.rollover(now);
+    }, 60_000);
     return () => clearInterval(timer);
   });
 </script>

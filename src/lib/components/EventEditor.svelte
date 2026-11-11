@@ -6,7 +6,7 @@
   // can only change their own show-as and reminder. Ctrl+Enter saves; Esc closes (twice
   // when there are unsaved changes).
   import { onMount } from "svelte";
-  import { DoorOpen, Repeat, Users } from "@lucide/svelte";
+  import { DoorOpen, Repeat, Users, Video } from "@lucide/svelte";
   import { api, type Contact, type EditAttendee, type EditableEvent, type EventChanges, type EventTimes, type Room, type RoomList } from "#lib/api.js";
   import { calendar, localDate } from "#lib/calendar.svelte.js";
   import { keymap } from "#lib/keys.svelte.js";
@@ -52,6 +52,8 @@
   let descriptionHtml = $state("");
   let descriptionDirty = $state(false);
   let recurrence = $state<Recurrence | null>(null);
+  /** Add an online meeting (Teams, Meet...) when saving. */
+  let online = $state(false);
   let isOrganizer = $state(true);
   let error = $state<string | null>(null);
   let saving = $state(false);
@@ -158,6 +160,7 @@
           isPrivate = ev.sensitivity === "private";
           descriptionHtml = ev.descriptionHtml;
           recurrence = ev.recurrence;
+          online = ev.onlineMeeting;
           isOrganizer = ev.isOrganizer;
           loading = false;
           queueMicrotask(() => titleInput?.focus());
@@ -170,8 +173,30 @@
     }
     return keymap.register([
       { id: "editor.save", keys: "ctrl+Enter", label: "Save event", group: "Event editor", when: () => mail.overlay === "editevent", run: save },
+      { id: "editor.online", keys: "ctrl+m", label: "Add an online meeting (Teams, Meet)", group: "Event editor", when: () => mail.overlay === "editevent" && canAddOnline, run: () => (online = !online) },
       { id: "editor.close", keys: "Escape", label: "Close the editor", group: "Event editor", when: () => mail.overlay === "editevent" && !suggestions.length && !roomOpen, run: close },
     ]);
+  });
+
+  // ----- online meeting: what the account's calendar offers (Teams for work accounts) -----
+  let meetingProvider = $state<string | null>(null);
+  $effect(() => {
+    const id = accountId;
+    meetingProvider = null;
+    // A new event's tick was for the last calendar's meeting kind; this one may offer another, or none.
+    if (creating) online = false;
+    api.meetingProvider(id).then((p) => accountId === id && (meetingProvider = p), () => {});
+  });
+  const hadOnline = $derived(!!original?.onlineMeeting);
+  /** Once an event has one it stays: Outlook and Google don't take it off again. */
+  /** Not on one occurrence: an online meeting belongs to the whole series. */
+  const canAddOnline = $derived(!guestMode && !hadOnline && !!meetingProvider && !(inSeries && !seriesScope));
+  const onlineLabel = $derived.by(() => {
+    const p = meetingProvider ?? "";
+    if (p === "hangoutsMeet") return "Google Meet";
+    if (p.startsWith("teams")) return "Teams meeting";
+    if (p.startsWith("skype")) return "Skype meeting";
+    return "Online meeting";
   });
 
   // ----- rooms (Microsoft 365: suggested for the location, booked by inviting them) -----
@@ -373,11 +398,12 @@
     if (showAs !== original.showAs) c.showAs = showAs;
     if (reminder !== reminderValue(original.reminderMinutes, original.reminderDefault) && minutes !== undefined) c.reminder = { minutes };
     if ((isPrivate ? "private" : "normal") !== original.sensitivity) c.sensitivity = isPrivate ? "private" : "normal";
+    if (online && canAddOnline && meetingProvider) c.onlineMeeting = meetingProvider;
     return c;
   }
 
   const dirty = $derived.by(() => {
-    if (creating) return subject.trim() !== "" || descriptionDirty || attendees.length > 0 || location !== "";
+    if (creating) return subject.trim() !== "" || descriptionDirty || attendees.length > 0 || location !== "" || online;
     const t = toWire();
     return typeof t !== "string" && Object.keys(changes(t)).length > 0;
   });
@@ -415,6 +441,7 @@
             ...(locationEmail && location.trim() ? { locationEmail } : {}),
             ...(recurrence ? { recurrence, times } : {}),
             ...(attendees.length ? { attendees } : {}),
+            ...(online && meetingProvider ? { onlineMeeting: meetingProvider } : {}),
             showAs,
             reminder: { minutes },
             sensitivity: isPrivate ? "private" : "normal",
@@ -642,6 +669,19 @@
               </ul>
             {/if}
           </div>
+
+          {#if canAddOnline || hadOnline}
+            <span>Online</span>
+            <span class="flex items-center gap-2">
+              <label data-testid="editor-online" class="flex items-center gap-1.5" title="Ctrl+M">
+                <input data-testid="editor-online-meeting" type="checkbox" tabindex="-1" bind:checked={online} onchange={() => (armedDiscard = false)} disabled={!canAddOnline} class="accent-accent" />
+                <Video size={14} class="text-ink-500" />
+                {hadOnline ? "Has an online meeting" : onlineLabel}
+              </label>
+              {#if canAddOnline}<kbd class="text-[11px]">Ctrl</kbd><kbd class="text-[11px]">M</kbd>{/if}
+              {#if online && !hadOnline}<span data-testid="editor-online-note" class="text-xs text-ink-500">The join link is added when it's saved</span>{/if}
+            </span>
+          {/if}
 
           <span class="self-start pt-1.5">Guests</span>
           <div class="relative">

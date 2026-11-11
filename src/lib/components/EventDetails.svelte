@@ -40,6 +40,8 @@
 
   /** Part of a series: known from the row at once, confirmed by the details. */
   const inSeries = $derived(!!e && (e.eventType === "occurrence" || e.eventType === "exception" || !!detail?.isOccurrence));
+  /** The series itself (a recurring invite's "Show in calendar"): answering, editing and deleting it cover every meeting. */
+  const isMaster = $derived(e?.eventType === "seriesMaster");
   const description = $derived(detail && detail.bodyHtml.replace(/<p>\s*(<br\s*\/?>)?\s*<\/p>/g, "").trim() ? detail.bodyHtml : "");
 
   const when = $derived.by(() => {
@@ -113,7 +115,8 @@
 
   function answer(r: Rsvp) {
     if (!canRespond) return;
-    if (inSeries) pending = { kind: "rsvp", r };
+    if (isMaster) void send(r, true);
+    else if (inSeries) pending = { kind: "rsvp", r };
     else void send(r, false);
   }
 
@@ -137,7 +140,8 @@
 
   function edit() {
     if (!canEdit) return;
-    if (inSeries) pending = { kind: "edit" };
+    if (isMaster) startEdit(true);
+    else if (inSeries) pending = { kind: "edit" };
     else startEdit(false);
   }
 
@@ -150,7 +154,8 @@
   function askDelete() {
     if (!e) return;
     deleteMessage = "";
-    if (inSeries) pending = { kind: "delete" };
+    if (isMaster) deleting = { series: true };
+    else if (inSeries) pending = { kind: "delete" };
     else deleting = { series: false };
   }
 
@@ -176,7 +181,7 @@
     try {
       await api.respondToEvent(e.accountId, e.remoteId, r, series);
       calendar.selected = { ...e, response: status };
-      mail.showToast({ text: `${{ accept: "Accepted", tentative: "Tentatively accepted", decline: "Declined" }[r]}${inSeries ? (series ? " the series" : " this occurrence") : ""}` });
+      mail.showToast({ text: `${{ accept: "Accepted", tentative: "Tentatively accepted", decline: "Declined" }[r]}${inSeries || isMaster ? (series ? " the series" : " this occurrence") : ""}` });
       await calendar.refresh();
     } catch (err) {
       mail.showToast({ text: String(err), error: true });
@@ -220,13 +225,13 @@
           <h2 data-testid="event-title" class="flex-1 text-lg font-semibold text-ink-100 select-text">{e.subject || "(no title)"}</h2>
           <button data-testid="event-close" title="Close (Esc)" aria-label="Close" onclick={close} class="icon-btn size-7"><X size={16} /></button>
         </div>
-        {#if inSeries}
+        {#if inSeries || isMaster}
           <!-- Never leave you guessing whether this is one meeting or all of them. -->
           <div data-testid="event-series" class="mt-2 flex items-start gap-2 rounded-md border border-accent/40 bg-accent/10 px-3 py-2 text-sm">
             <Repeat size={15} class="mt-0.5 shrink-0 text-accent" />
             <div class="min-w-0">
               <p class="font-medium text-ink-100">
-                One occurrence of a recurring series{#if detail?.isException}<span data-testid="event-exception" class="font-normal text-amber-300"> · changed from the series</span>{/if}
+                {isMaster ? "Every meeting in a recurring series" : "One occurrence of a recurring series"}{#if detail?.isException}<span data-testid="event-exception" class="font-normal text-amber-300"> · changed from the series</span>{/if}
               </p>
               <p data-testid="event-recurrence" class="text-ink-300">
                 {#if detail?.recurrence}{describeRecurrence(detail.recurrence)}{:else if detail}Repeats{:else}…{/if}

@@ -1,6 +1,6 @@
 import { signIn } from "../harness/app.ts";
 import { localAt } from "../harness/calendar-fixtures.ts";
-import { test, expect, row, snap, waitForSyncIdle, showRecentPane } from "./fixtures";
+import { test, expect, row, snap, syncNow, waitForSyncIdle, showRecentPane } from "./fixtures";
 
 type Fake = Parameters<Parameters<typeof test>[2]>[0]["fake"];
 type Page = import("@playwright/test").Page;
@@ -78,4 +78,92 @@ test("viewing an invite jumps the calendar sidebar to its day and highlights it 
   await expect(page.getByTestId("pane-tab-recent")).toHaveAttribute("aria-selected", "true");
   await page.keyboard.press("0");
   await expect(page.getByTestId("day-label")).toContainText("Today");
+});
+
+test("an invite to a recurring meeting gets an RSVP card that answers the whole series", async ({ inbox: page, fake }, testInfo) => {
+  // Reported: a weekly meeting's invite showed no card, because its event is the series master.
+  // This series began three weeks ago: the card and sidebar show its next meeting, not its first.
+  const start = localAt(-21, 10, 30);
+  const end = localAt(-21, 11, 0);
+  const nextStart = localAt(7, 10, 30);
+  const nextEnd = localAt(7, 11, 0);
+  const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const weekday = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"][start.getDay()];
+  const until = localAt(7 + 7 * 25, 10, 30);
+  await fake.control("event", {
+    id: "evt-weekly", subject: "Estimations catch up", start: start.toISOString(), end: end.toISOString(),
+    location: "Upstairs boardroom", response: "notResponded", organizer: ["Sam Carter", "sam.carter@contoso.com"],
+    recurrence: {
+      pattern: { type: "weekly", interval: 1, daysOfWeek: [weekday], firstDayOfWeek: "monday" },
+      range: { type: "endDate", startDate: ymd(start), endDate: ymd(until) },
+    },
+  });
+  await fake.control("event", { id: "evt-weekly-1", seriesMasterId: "evt-weekly", start: nextStart.toISOString(), end: nextEnd.toISOString() });
+  const { ids } = await fake.control("deliver", { subject: "Estimations catch up", eventId: "evt-weekly" });
+  await syncNow(page, fake);
+  await row(page, `conv-${ids[0]}`).click();
+
+  const card = page.getByTestId("invite-card");
+  await expect(card).toBeVisible();
+  await expect(card).toContainText("Estimations catch up");
+  await expect(card).toContainText(`Next: ${nextStart.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" })} · ${nextStart.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`);
+  await expect(page.getByTestId("invite-recurrence")).toContainText(`Every week on ${weekday[0].toUpperCase()}${weekday.slice(1)}, until`);
+  await expect(page.getByTestId("invite-status")).toHaveText("You haven't responded yet");
+  // The sidebar shows that next meeting, highlighted.
+  const occurrence = page.locator('[data-testid=cal-event][data-remote-id="evt-weekly-1"]');
+  await expect(occurrence).toHaveAttribute("data-focused", "true");
+  await snap(page, testInfo, "recurring-invite");
+
+  await page.keyboard.press("y");
+  await expect(page.getByTestId("invite-status")).toHaveText("You're going");
+  await expect.poll(async () => (await fake.control("event?id=evt-weekly")).responseStatus.response, { timeout: 10_000 }).toBe("accepted");
+
+  // "Show in calendar" opens the series itself: deleting or editing it is about every meeting, said up front.
+  await page.getByTestId("invite-show").click();
+  await expect(page.getByTestId("event-series")).toContainText("Every meeting in a recurring series");
+  await page.getByTestId("event-delete").click();
+  await expect(page.getByTestId("event-delete-confirm")).toContainText("every event in this series");
+  await page.getByTestId("event-delete-back").click();
+  await page.keyboard.press("e");
+  await expect(page.getByTestId("editor-mode")).toHaveText("Edit series");
+});
+
+test("a failed invite lookup says so once, and the card appears when it next succeeds", async ({ inbox: page, fake }) => {
+  await fake.control("config", { failInvite: true });
+  await row(page, "conv-invite").click();
+  const toast = page.getByTestId("toast");
+  await expect(toast).toContainText("Couldn't load the meeting details");
+  await expect(page.getByTestId("invite-card")).toHaveCount(0);
+  await expect(toast).toBeHidden({ timeout: 10_000 });
+
+  // New mail refreshes the list and the open conversation, retrying the lookup, without toasting again.
+  const lookups = () => fake.state.requests.filter((r) => r.path.endsWith("/messages/msg-invite") && r.query.includes("eventMessage")).length;
+  const before = lookups();
+  await fake.control("deliver", { subject: "Something else" });
+  await syncNow(page, fake);
+  await expect.poll(lookups).toBeGreaterThan(before);
+  // Its failure lands just after the request. A one-off check: toBeHidden would wait out a
+  // repeat toast's own timeout and pass anyway.
+  await page.waitForTimeout(2000);
+  expect(await toast.count()).toBe(0);
+
+  // Another failing invite says so too; going back to the first doesn't say it again.
+  await fake.control("event", { id: "evt-other", subject: "Other meeting", start: new Date(Date.now() + 86_400_000).toISOString(), end: new Date(Date.now() + 90_000_000).toISOString() });
+  const { ids } = await fake.control("deliver", { subject: "Other meeting", eventId: "evt-other" });
+  await syncNow(page, fake);
+  await page.keyboard.press("Escape"); // back to the list
+  await row(page, `conv-${ids[0]}`).click();
+  await expect(toast).toContainText("Couldn't load the meeting details");
+  await expect(toast).toBeHidden({ timeout: 10_000 });
+  await page.keyboard.press("Escape");
+  const lookupsBefore = lookups();
+  await row(page, "conv-invite").click();
+  await expect.poll(lookups).toBeGreaterThan(lookupsBefore);
+  await page.waitForTimeout(2000);
+  expect(await toast.count()).toBe(0);
+
+  await fake.control("config", { failInvite: false });
+  await fake.control("deliver", { subject: "And another" });
+  await syncNow(page, fake);
+  await expect(page.getByTestId("invite-card")).toBeVisible();
 });

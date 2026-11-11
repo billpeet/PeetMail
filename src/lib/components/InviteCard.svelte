@@ -1,8 +1,9 @@
 <script lang="ts">
   // RSVP card shown above a conversation containing a meeting invite. y / m / n answer it.
-  import { CalendarClock, Check, HelpCircle, MapPin, X } from "@lucide/svelte";
+  import { CalendarClock, Check, HelpCircle, MapPin, Repeat, X } from "@lucide/svelte";
   import { calendar, eventTimes } from "#lib/calendar.svelte.js";
   import { mail } from "#lib/mail.svelte.js";
+  import { describeRecurrence } from "#lib/recurrence.js";
   import type { Invite, Rsvp } from "#lib/api.js";
 
   let { invite }: { invite: Invite } = $props();
@@ -41,8 +42,10 @@
   const cancelled = $derived(invite.meetingMessageType === "meetingCancelled" || e.isCancelled);
   const answerable = $derived(!cancelled && !e.isOrganizer && invite.meetingMessageType !== "meetingAccepted");
 
+  /** The meeting the card's time is for: a series' next one when it's known, else its first. */
+  const shown = $derived(invite.next ?? e);
   const when = $derived.by(() => {
-    const { start, end } = eventTimes(e);
+    const { start, end } = eventTimes(shown);
     const date = start.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
     if (e.isAllDay) return `${date} · all day`;
     const t = (d: Date) => d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
@@ -63,7 +66,7 @@
   ];
 
   function showInCalendar() {
-    calendar.showWeekOf(eventTimes(e).start);
+    calendar.showWeekOf(eventTimes(shown).start);
     mail.view = "calendar";
     calendar.selected = e;
     mail.overlay = "event";
@@ -78,7 +81,10 @@
         {#if isUpdate && !cancelled}<span class="mr-1 rounded bg-amber-400/15 px-1.5 py-0.5 text-[11px] font-medium text-amber-300">Updated</span>{/if}
         {e.subject || "(no title)"}
       </p>
-      <p class="mt-0.5 text-sm text-ink-300">{when}</p>
+      <p class="mt-0.5 text-sm text-ink-300">{invite.recurrence ? `${invite.next ? "Next" : "First"}: ${when}` : when}</p>
+      {#if invite.recurrence}
+        <p data-testid="invite-recurrence" class="mt-0.5 flex items-center gap-1 text-sm text-ink-500"><Repeat size={13} />{describeRecurrence(invite.recurrence)}</p>
+      {/if}
       {#if e.location}<p class="mt-0.5 flex items-center gap-1 text-sm text-ink-500"><MapPin size={13} />{e.location}</p>{/if}
       {#if timeChanged}
         <p data-testid="invite-changed" class="mt-1.5 text-sm">

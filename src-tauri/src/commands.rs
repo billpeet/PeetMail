@@ -1194,11 +1194,12 @@ pub fn create_event(
     app: AppHandle,
     state: State<'_, AppState>,
     account_id: i64,
-    event: crate::outbox::NewEvent,
+    mut event: crate::outbox::NewEvent,
 ) -> Result<crate::calendar::Event> {
     if event.subject.trim().is_empty() {
         return Err(AppError::Other("an event needs a title".into()));
     }
+    event.details.stamp_meeting_request();
     let created = state.db.with(|c| {
         let accounts = db::list_accounts(c)?;
         let me = accounts.iter().find(|a| a.id == account_id).ok_or_else(|| AppError::Other("unknown account".into()))?;
@@ -1237,11 +1238,12 @@ pub fn update_event(
     state: State<'_, AppState>,
     account_id: i64,
     remote_id: String,
-    changes: crate::event_edit::EventChanges,
+    mut changes: crate::event_edit::EventChanges,
 ) -> Result<()> {
     if changes.is_empty() {
         return Ok(());
     }
+    changes.stamp_meeting_request();
     if changes.subject.as_deref().is_some_and(|s| s.trim().is_empty()) {
         return Err(AppError::Other("an event needs a title".into()));
     }
@@ -1279,6 +1281,13 @@ pub fn delete_calendar_event(
     outbox::kick(&app);
     let _ = app.emit(crate::calendar::EVENT_CALENDAR_CHANGED, serde_json::json!({ "accountId": account_id }));
     Ok(())
+}
+
+/// The online meeting a new event on this account can have ("teamsForBusiness",
+/// "hangoutsMeet"...), or None.
+#[tauri::command]
+pub async fn meeting_provider(state: State<'_, AppState>, account_id: i64) -> Result<Option<String>> {
+    crate::event_edit::meeting_provider(&state, account_id).await
 }
 
 /// Meeting rooms of a Microsoft 365 account (location suggestions); none for others.

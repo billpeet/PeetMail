@@ -234,3 +234,32 @@ test("week view day headers line up with the day columns below them", async ({ i
     expect(Math.abs(headers[i][1] - columns[i][1])).toBeLessThanOrEqual(1);
   }
 });
+
+test("after midnight, a day view left on today moves to the new today", async ({ inbox: page }) => {
+  await showCalendarPane(page);
+  const label = (d: Date) => d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+  const now = new Date();
+  const nextMorning = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 5);
+  await expect(page.getByTestId("day-label")).toContainText(label(now));
+
+  // The PC's clock passes midnight; the app notices on its next check (here: the window coming back).
+  await page.clock.setSystemTime(nextMorning);
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect(page.getByTestId("day-label")).toContainText(label(nextMorning));
+  await expect(page.getByTestId("day-label")).toContainText("Today");
+});
+
+test("after midnight, the week view highlights the new today (and moves on a week if it starts one)", async ({ inbox: page }) => {
+  await page.keyboard.press("g");
+  await page.keyboard.press("c");
+  await expect(page.getByTestId("week-view")).toBeVisible();
+  const todayCol = page.locator("[data-testid=week-day][data-today=true]");
+  const now = new Date();
+  await expect(todayCol).toContainText(String(now.getDate()));
+
+  const nextMorning = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 5);
+  await page.clock.setSystemTime(nextMorning);
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect(todayCol).toContainText(String(nextMorning.getDate()));
+  await expect(page.getByTestId("week-today")).toBeDisabled();
+});

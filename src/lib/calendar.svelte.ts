@@ -78,15 +78,51 @@ class CalendarStore {
   #dayBeforeFocus: Date | null = null;
   #seq = 0;
   #weekSeq = 0;
+  /** Today (local midnight) as of the last check: the views label and highlight by it. */
+  todayStart = $state(startOfDay(new Date()));
+
+  /**
+   * After midnight (or waking the PC on a later day), the day and week views still on what
+   * was today move to the new today. Views you'd moved to another date stay put.
+   */
+  rollover(now = new Date()) {
+    const today = startOfDay(now);
+    const was = this.todayStart;
+    if (today.getTime() === was.getTime()) return;
+    this.todayStart = today;
+    // An open invite holds the day view; closing it goes back to the new today instead.
+    if (this.focus) {
+      if (this.#dayBeforeFocus?.getTime() === was.getTime()) this.#dayBeforeFocus = today;
+    } else if (this.day.getTime() === was.getTime()) {
+      this.goToDay(today);
+    }
+    // Compared as instants, not recomputed: after a time zone change, "was" and the week on
+    // screen are both midnights in the old zone, and the week is rebuilt in the new one.
+    const showedToday = this.weekStart.getTime() <= was.getTime() && was.getTime() < addDays(this.weekStart, 7).getTime();
+    if (showedToday && this.weekStart.getTime() !== startOfWeek(today, this.weekStartsOn).getTime()) this.showWeekOf(today);
+  }
+
+  /** Checks for a new day every half minute and whenever the window comes back. Returns a stop function. */
+  watchDate(): () => void {
+    const check = () => this.rollover();
+    const timer = setInterval(check, 30_000);
+    document.addEventListener("visibilitychange", check);
+    window.addEventListener("focus", check);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", check);
+      window.removeEventListener("focus", check);
+    };
+  }
 
   get isThisWeek(): boolean {
-    return this.weekStart.getTime() === startOfWeek(new Date(), this.weekStartsOn).getTime();
+    return this.weekStart.getTime() === startOfWeek(this.todayStart, this.weekStartsOn).getTime();
   }
 
   /** Applies the week-start preference, keeping the same week on screen. */
   setWeekStartsOn(day: number) {
     if (day === this.weekStartsOn) return;
-    const anchor = this.isThisWeek ? new Date() : this.weekStart;
+    const anchor = this.isThisWeek ? this.todayStart : this.weekStart;
     this.weekStartsOn = day;
     this.weekStart = startOfWeek(anchor, day);
     return this.loadWeek();
@@ -110,7 +146,8 @@ class CalendarStore {
   }
 
   thisWeek() {
-    return this.showWeekOf(new Date());
+    this.rollover();
+    return this.showWeekOf(this.todayStart);
   }
 
   /** Reloads everything that's showing (after a sync or a change). */
@@ -141,7 +178,7 @@ class CalendarStore {
   }
 
   get isToday(): boolean {
-    return this.day.getTime() === startOfDay(new Date()).getTime();
+    return this.day.getTime() === this.todayStart.getTime();
   }
 
   async load() {
@@ -160,7 +197,8 @@ class CalendarStore {
   }
 
   today() {
-    return this.goToDay(new Date());
+    this.rollover();
+    return this.goToDay(this.todayStart);
   }
 }
 

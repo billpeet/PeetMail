@@ -257,6 +257,8 @@ class MailStore {
   /** The meeting invite in the open conversation, if any (for the RSVP card and y/m/n). */
   invite = $state.raw<Invite | null>(null);
   #inviteSeq = 0;
+  /** Invite messages whose lookup failed: list refreshes and reopening retry them without toasting again. */
+  #inviteFailed = new Set<number>();
   /** Remote images allowed for the open conversation. */
   imagesFor = $state<string | null>(null);
 
@@ -1103,14 +1105,20 @@ class MailStore {
     try {
       const invite = await api.inviteEvent(msg.id);
       if (seq !== this.#inviteSeq) return;
+      this.#inviteFailed.delete(msg.id);
       this.invite = invite;
       // Show the meeting in the calendar sidebar, among everything else that day.
-      if (invite) calendar.showInContext(invite.event);
+      // A series shows its next meeting: its own start can be months back.
+      if (invite) calendar.showInContext(invite.next ?? invite.event);
       else calendar.clearContext();
-    } catch {
+    } catch (e) {
       if (seq === this.#inviteSeq) {
         this.invite = null;
         calendar.clearContext();
+        // Gmail mail is only a guess until its calendar part is read: no toast for what may be ordinary mail.
+        const knownInvite = !!msg.meetingMessageType || msg.messageType === "eventMessage";
+        if (knownInvite && !this.#inviteFailed.has(msg.id)) this.showToast({ text: `Couldn't load the meeting details: ${e}`, error: true });
+        this.#inviteFailed.add(msg.id);
       }
     }
   }

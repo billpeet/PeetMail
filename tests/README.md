@@ -84,6 +84,6 @@ pnpm drive stop
 
 ## Fake server control API
 
-`POST /_test/<route>` with JSON. `GET /_test` lists them all. The main ones: `deliver` (with optional `to`, `cc`, `folder`, `inference`), `update` (partial change such as `isRead`), `move`, `remove`, `throttle`, `config` (`rejectDeltaFilter`, `expireDelta`, `tokenTtl`, `latencyMs`, `failBody`, `failWrites`), `expire-tokens`, `reset`, `requests`, `sent`, `message?id=`. Anything under `/img/` on the fake returns a PNG, standing in for a sender's image host.
+`POST /_test/<route>` with JSON. `GET /_test` lists them all. The main ones: `deliver` (with optional `to`, `cc`, `folder`, `inference`), `update` (partial change such as `isRead`), `move`, `remove`, `throttle`, `config` (`rejectDeltaFilter`, `expireDelta`, `tokenTtl`, `latencyMs`, `failBody`, `failInvite`, `failWrites`), `expire-tokens`, `reset`, `requests`, `sent`, `message?id=`. Anything under `/img/` on the fake returns a PNG, standing in for a sender's image host.
 
 When the app starts calling a new Graph endpoint, add it to `fake-graph.ts` with the real API's semantics, including its error cases, then test it through the app.

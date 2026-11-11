@@ -252,6 +252,53 @@ test("editing and deleting Google events: PATCH with only the changes; a guest r
   ]);
 });
 
+test("a Google event can get a Meet link, and a calendar without Meet offers none", async ({ inbox: page, gmail }) => {
+  await addGmail(page);
+  await showCalendarPane(page);
+  await expect.poll(async () => (await gEvents(page)).length, { timeout: 15_000 }).toBeGreaterThan(0);
+
+  await (await findInDayView(page, "gcal-dentist")).click();
+  await page.keyboard.press("e");
+  await expect(page.getByTestId("editor-title")).toHaveValue("Dentist");
+  await expect(page.getByTestId("editor-online")).toContainText("Google Meet");
+  await page.keyboard.press("Control+m");
+  await page.keyboard.press("Control+Enter");
+  // Google only makes the meeting when the request says conferenceDataVersion=1 (the fake drops it otherwise).
+  await expect.poll(() => gmail.state.events.get("gcal-dentist")?.hangoutLink, { timeout: 10_000 }).toMatch(/^https:\/\/meet\.google\.com\//);
+  const sent = gmail.state.sent.find((s) => s.kind === "update-event")!;
+  expect(sent.body.conferenceData.createRequest.conferenceSolutionKey).toEqual({ type: "hangoutsMeet" });
+
+  // A Workspace calendar with Meet turned off: no toggle, once Google has said so.
+  await gmail.control("config", { conferenceTypes: [] });
+  const asked = () => gmail.state.requests.filter((r) => r.path === "/calendar/v3/calendars/primary").length;
+  const before = asked();
+  await page.keyboard.press("Shift+C");
+  await page.getByTestId("quick-add-input").fill("Stand-up tomorrow 9am");
+  await page.keyboard.press("Control+Tab");
+  await expect(page.getByTestId("quick-add-account")).toContainText("Google Calendar");
+  await page.keyboard.press("Tab");
+  await expect(page.getByTestId("event-editor")).toBeVisible();
+  await expect.poll(asked).toBeGreaterThan(before);
+  await page.waitForTimeout(300);
+  await expect(page.getByTestId("editor-online-meeting")).toHaveCount(0);
+});
+
+test("a new event's Teams tick doesn't carry over to a calendar that offers Meet", async ({ inbox: page, gmail }) => {
+  await addGmail(page);
+  await page.keyboard.press("Shift+C");
+  await page.getByTestId("quick-add-input").fill("Planning tomorrow 2pm");
+  await page.keyboard.press("Tab");
+  await expect(page.getByTestId("editor-online")).toContainText("Teams meeting");
+  await page.keyboard.press("Control+m");
+  await expect(page.getByTestId("editor-online-meeting")).toBeChecked();
+  await page.getByTestId("editor-calendar").selectOption({ index: 1 });
+  await expect(page.getByTestId("editor-online")).toContainText("Google Meet");
+  await expect(page.getByTestId("editor-online-meeting")).not.toBeChecked();
+  await page.keyboard.press("Control+Enter");
+  await expect.poll(() => gmail.state.sent.filter((s) => s.kind === "create-event").length, { timeout: 10_000 }).toBe(1);
+  expect(gmail.state.sent.find((s) => s.kind === "create-event")!.body.conferenceData).toBeUndefined();
+});
+
 test("a repeating Google event goes as an RRULE, in local time", async ({ inbox: page, gmail }) => {
   await addGmail(page);
   await page.keyboard.press("Shift+C");
