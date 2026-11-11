@@ -49,22 +49,28 @@ pub const KEY_WEEK_STARTS_ON: &str = "week_starts_on";
 pub const KEY_UNDO_SEND_SECS: &str = "undo_send_secs";
 pub const KEY_NOTIFY: &str = "notify";
 pub const KEY_CLOSE_TO_TRAY: &str = "close_to_tray";
+pub const KEY_CHECK_MAIL: &str = "check_mail";
 pub const DEFAULT_UNDO_SEND_SECS: i64 = 10;
 
 pub const DEFAULT_CACHE_DAYS: i64 = 90;
 /// A phone has less room, and its storage is shared with photos and apps.
 pub const DEFAULT_BODY_CACHE_MB: i64 = if cfg!(target_os = "android") { 100 } else { 500 };
 
+pub(crate) static SYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static OUTBOX_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub struct AppState {
     pub db: Db,
     pub http: reqwest::Client,
     tokens: tokio::sync::Mutex<HashMap<i64, TokenSet>>,
-    /// Serializes sync runs so the timer and "sync now" never overlap.
-    pub sync_lock: tokio::sync::Mutex<()>,
+    /// Serializes sync runs so the timer and "sync now" never overlap. One per process, not
+    /// per state: on Android a background job's state can sit beside the app's (context.rs).
+    pub sync_lock: &'static tokio::sync::Mutex<()>,
     /// Cancels the sign-in currently waiting on the browser, if any.
     pub sign_in_cancel: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    /// Held while the outbox worker drains, so only one drain runs.
-    pub outbox_lock: tokio::sync::Mutex<()>,
+    /// Held while the outbox worker drains, so only one drain runs (per process, as above:
+    /// two drains could send the same message twice).
+    pub outbox_lock: &'static tokio::sync::Mutex<()>,
     /// Most recent undoable actions, newest last.
     pub undo: std::sync::Mutex<Vec<crate::actions::UndoGroup>>,
     /// Held while bodies are prefetched in the background, so runs don't pile up.
@@ -104,6 +110,9 @@ pub struct Preferences {
     pub notify: String,
     /// Closing the window keeps PeetMail running in the tray (default on).
     pub close_to_tray: bool,
+    /// Phones: how often to check for mail with PeetMail closed: "15" (minutes, the
+    /// default), "60", or "open" (only while it's open). See background.rs.
+    pub check_mail: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,9 +134,9 @@ impl AppState {
             db,
             http,
             tokens: Default::default(),
-            sync_lock: Default::default(),
+            sync_lock: &SYNC_LOCK,
             sign_in_cancel: Default::default(),
-            outbox_lock: Default::default(),
+            outbox_lock: &OUTBOX_LOCK,
             undo: Default::default(),
             prefetch_lock: Default::default(),
             drafts_lock: Default::default(),
@@ -227,6 +236,11 @@ impl AppState {
                     _ => "focused".into(),
                 },
                 close_to_tray: db::get_setting(c, KEY_CLOSE_TO_TRAY)?.as_deref() != Some("0"),
+                check_mail: match db::get_setting(c, KEY_CHECK_MAIL)?.as_deref() {
+                    Some("60") => "60".into(),
+                    Some("open") => "open".into(),
+                    _ => "15".into(),
+                },
             })
         })
     }
@@ -243,7 +257,8 @@ impl AppState {
             db::set_setting(c, KEY_WEEK_STARTS_ON, &p.week_starts_on.rem_euclid(7).to_string())?;
             db::set_setting(c, KEY_UNDO_SEND_SECS, &p.undo_send_secs.clamp(0, 60).to_string())?;
             db::set_setting(c, KEY_NOTIFY, match p.notify.as_str() { "off" => "off", "all" => "all", _ => "focused" })?;
-            db::set_setting(c, KEY_CLOSE_TO_TRAY, flag(p.close_to_tray))
+            db::set_setting(c, KEY_CLOSE_TO_TRAY, flag(p.close_to_tray))?;
+            db::set_setting(c, KEY_CHECK_MAIL, match p.check_mail.as_str() { "60" => "60", "open" => "open", _ => "15" })
         })
     }
 
@@ -335,5 +350,23 @@ impl AppState {
         let token = fresh.access_token.clone();
         cache.insert(account_id, fresh);
         Ok(token)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_mail_defaults_to_every_15_minutes_and_keeps_only_known_choices() {
+        let state = AppState::new(Db::open_in_memory().unwrap());
+        assert_eq!(state.preferences().unwrap().check_mail, "15");
+        let mut p = state.preferences().unwrap();
+        p.check_mail = "open".into();
+        state.set_preferences(&p).unwrap();
+        assert_eq!(state.preferences().unwrap().check_mail, "open");
+        p.check_mail = "5".into();
+        state.set_preferences(&p).unwrap();
+        assert_eq!(state.preferences().unwrap().check_mail, "15", "Android can't run it more often than every 15 minutes");
     }
 }

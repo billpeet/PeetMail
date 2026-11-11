@@ -7,7 +7,9 @@
 
 use rusqlite::{params, Connection};
 use serde::Serialize;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
+#[cfg(desktop)]
+use tauri::Manager;
 
 use crate::db;
 use crate::error::Result;
@@ -148,7 +150,8 @@ fn app_in_front(_app: &AppHandle) -> bool {
     crate::lifecycle::in_front()
 }
 
-/// Shows toasts (or, in tests, appends them to PEETMAIL_NOTIFY_LOG as JSON lines).
+/// Shows toasts (or, in tests, appends them to PEETMAIL_NOTIFY_LOG as JSON lines). Code
+/// that may run in a background job goes through `Core::notify` instead.
 pub fn show(app: &AppHandle, toasts: Vec<Toast>) {
     if toasts.is_empty() || app_in_front(app) {
         return;
@@ -176,8 +179,8 @@ pub fn show(app: &AppHandle, toasts: Vec<Toast>) {
 }
 
 /// After a sync: announce new mail for every signed-in account.
-pub fn after_sync(app: &AppHandle) {
-    let state = app.state::<crate::state::AppState>();
+pub fn after_sync(app: &crate::context::Core) {
+    let state = app.state();
     let mode = state.preferences().map(|p| p.notify).unwrap_or_else(|_| "focused".into());
     let not_before = (chrono::Utc::now() - chrono::Duration::days(1)).format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let found = state.db.with(|c| {
@@ -188,7 +191,7 @@ pub fn after_sync(app: &AppHandle) {
         Ok(all)
     });
     match found {
-        Ok(mail) => show(app, toasts_for(&mail)),
+        Ok(mail) => app.notify(toasts_for(&mail)),
         Err(e) => log::error!("new-mail notifications: {e}"),
     }
 }

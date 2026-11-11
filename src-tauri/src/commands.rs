@@ -50,8 +50,14 @@ pub fn bootstrap(state: State<'_, AppState>) -> Result<Bootstrap> {
 }
 
 #[tauri::command]
-pub fn set_preferences(state: State<'_, AppState>, preferences: Preferences) -> Result<()> {
-    state.set_preferences(&preferences)
+pub fn set_preferences(app: AppHandle, state: State<'_, AppState>, preferences: Preferences) -> Result<()> {
+    state.set_preferences(&preferences)?;
+    // "Check for mail" may have changed. Blocks on Kotlin, so off this (main) thread.
+    #[cfg(target_os = "android")]
+    std::thread::spawn(move || crate::background::schedule(tauri::Manager::state::<AppState>(&app).inner()));
+    #[cfg(not(target_os = "android"))]
+    let _ = app;
+    Ok(())
 }
 
 /// Saves the user's own Entra app (Settings → Advanced). Changing it signs out the accounts
@@ -680,6 +686,15 @@ pub async fn notification_permission(app: AppHandle, ask: bool) -> Result<String
 pub async fn open_notification_settings() -> Result<()> {
     #[cfg(target_os = "android")]
     return crate::android::open_notification_settings().await;
+    #[cfg(not(target_os = "android"))]
+    Ok(())
+}
+
+/// PeetMail's page in Android's settings, to let it run in the background unrestricted.
+#[tauri::command]
+pub async fn open_battery_settings() -> Result<()> {
+    #[cfg(target_os = "android")]
+    return crate::android::open_battery_settings().await;
     #[cfg(not(target_os = "android"))]
     Ok(())
 }

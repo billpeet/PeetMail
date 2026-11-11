@@ -191,7 +191,11 @@ export type Preferences = {
   notify: "off" | "focused" | "all";
   /** Closing the window keeps PeetMail running in the tray. */
   closeToTray: boolean;
+  /** Phones: how often to check for mail with PeetMail closed (minutes), or only while open. */
+  checkMail: CheckMail;
 };
+
+export type CheckMail = "15" | "60" | "open";
 
 export type Attendee = { name: string | null; address: string | null; response: string | null; type: string | null };
 
@@ -344,6 +348,7 @@ export const api = {
   /** "granted" | "denied" | "prompt"; `ask` shows Android's prompt if it hasn't been answered. */
   notificationPermission: (ask: boolean) => invoke<NotificationPermission>("notification_permission", { ask }),
   openNotificationSettings: () => invoke<void>("open_notification_settings"),
+  openBatterySettings: () => invoke<void>("open_battery_settings"),
   /** Opens a link in the browser / mail app (recorded instead in tests). */
   openExternal: (url: string) => invoke<void>("open_external", { url }),
   setSnippets: (snippets: Snippet[]) => invoke<Snippet[]>("set_snippets", { snippets }),

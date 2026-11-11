@@ -5,7 +5,7 @@ use chrono::{Duration, Utc};
 use reqwest::Method;
 use serde::Serialize;
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager};
+use crate::context::Core;
 use url::Url;
 
 use crate::db::{self, Account, Folder, MessageUpsert};
@@ -87,12 +87,13 @@ async fn graph_bytes(state: &AppState, account_id: i64, url: &str) -> Result<Vec
 }
 
 /// Syncs every account. Errors are reported per account and don't stop the others.
-pub async fn sync_all(app: &AppHandle) -> Result<()> {
-    crate::telemetry::traced("sync.run", vec![], sync_all_accounts(app)).await
+pub async fn sync_all(app: impl Into<Core>) -> Result<()> {
+    let core = app.into();
+    crate::telemetry::traced("sync.run", vec![], sync_all_accounts(&core)).await
 }
 
-async fn sync_all_accounts(app: &AppHandle) -> Result<()> {
-    let state = app.state::<AppState>();
+async fn sync_all_accounts(app: &Core) -> Result<()> {
+    let state = app.state();
     let _guard = state.sync_lock.lock().await;
     let accounts = state.db.with(|c| db::list_accounts(c))?;
     let _ = app.emit(EVENT_SYNC_STATUS, SyncStatus { state: "syncing", message: None });
@@ -101,7 +102,7 @@ async fn sync_all_accounts(app: &AppHandle) -> Result<()> {
     for account in accounts.iter().filter(|a| a.signed_in) {
         let provider = if account.provider == "google" { "google" } else { "microsoft" };
         let attrs = vec![crate::telemetry::attr(crate::telemetry::Key::Provider, provider)];
-        if let Err(e) = crate::telemetry::traced("sync.account", attrs, sync_account(app, &state, account)).await {
+        if let Err(e) = crate::telemetry::traced("sync.account", attrs, sync_account(app, state, account)).await {
             log::error!("sync failed for {}: {e}", account.email);
             last_error = Some(format!("{}: {e}", account.email));
         }
@@ -116,7 +117,10 @@ async fn sync_all_accounts(app: &AppHandle) -> Result<()> {
     };
     let _ = app.emit(EVENT_SYNC_STATUS, status);
     crate::notify::after_sync(app);
-    tauri::async_runtime::spawn(prefetch_bodies(app.clone()));
+    // A background job's run is short; bodies are fetched when PeetMail is open again.
+    if !app.is_background() {
+        tauri::async_runtime::spawn(prefetch_bodies(app.clone()));
+    }
     Ok(())
 }
 
@@ -127,8 +131,8 @@ const PREFETCH_CONCURRENCY: usize = 4;
 
 /// Downloads bodies the user is likely to open next into the SQLite cache, so opening a
 /// message never waits on the network. Runs after each sync; already-cached bodies are skipped.
-pub async fn prefetch_bodies(app: AppHandle) {
-    let state = app.state::<AppState>();
+pub async fn prefetch_bodies(app: Core) {
+    let state = app.state();
     let Ok(_guard) = state.prefetch_lock.try_lock() else { return };
     let ids = match state.db.with(|c| db::bodies_to_prefetch(c, PREFETCH_NEWEST, PREFETCH_MAX)) {
         Ok(ids) => ids,
@@ -146,8 +150,8 @@ pub async fn prefetch_bodies(app: AppHandle) {
         let app = app.clone();
         // Background: Gmail calls wait for quota budget, ahead of nothing you open yourself.
         tasks.spawn(crate::gmail::background(async move {
-            let state = app.state::<AppState>();
-            if let Err(e) = message_body(&state, id).await {
+            let state = app.state();
+            if let Err(e) = message_body(state, id).await {
                 log::info!("prefetch body {id}: {e}");
             }
         }));
@@ -168,7 +172,7 @@ const SYNCED_FOLDERS: &[(&str, &str)] = &[
 /// Folders a mailbox may not have (some Exchange mailboxes have no Archive): a 404 skips them.
 const OPTIONAL_FOLDERS: &[&str] = &["archive", "junkemail"];
 
-async fn sync_account(app: &AppHandle, state: &AppState, account: &Account) -> Result<()> {
+async fn sync_account(app: &Core, state: &AppState, account: &Account) -> Result<()> {
     sync_mail_and_calendar(app, state, account).await?;
     // Drafts problems mustn't fail the sync.
     match crate::draft_sync::pull(state, account.id).await {
@@ -181,7 +185,7 @@ async fn sync_account(app: &AppHandle, state: &AppState, account: &Account) -> R
     Ok(())
 }
 
-async fn sync_mail_and_calendar(app: &AppHandle, state: &AppState, account: &Account) -> Result<()> {
+async fn sync_mail_and_calendar(app: &Core, state: &AppState, account: &Account) -> Result<()> {
     use crate::telemetry::{attr, traced, Key};
     if account.provider == "google" {
         traced("sync.mail", vec![attr(Key::Provider, "google")], crate::gmail::background(crate::gmail::sync_account(app, state, account.id))).await?;
@@ -245,7 +249,7 @@ fn initial_delta_url(folder: &Folder, since: Option<&str>, meeting_field: bool) 
     Url::parse_with_params(&base, &params).expect("valid url").to_string()
 }
 
-async fn sync_folder(app: &AppHandle, state: &AppState, account_id: i64, folder: &Folder) -> Result<()> {
+async fn sync_folder(app: &Core, state: &AppState, account_id: i64, folder: &Folder) -> Result<()> {
     let limits = state.cache_limits()?;
     let cutoff = (Utc::now() - Duration::days(limits.cache_days)).format("%Y-%m-%dT%H:%M:%SZ").to_string();
 

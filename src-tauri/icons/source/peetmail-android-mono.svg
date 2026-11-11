@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108">
+  <!-- Android themed (monochrome) icon: the P's silhouette with the envelope cut out. The
+       launcher tints it, so only its shape counts. Same placement as peetmail-android.svg. -->
+  <defs>
+    <mask id="envelope">
+      <rect width="1024" height="1024" fill="#fff"/>
+      <path d="M 356 304 L 530 432 L 704 304" fill="none" stroke="#000" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"/>
+    </mask>
+  </defs>
+  <g transform="translate(54 54) scale(0.074) translate(-519 -522)" mask="url(#envelope)" fill="#fff">
+    <rect x="270" y="206" width="168" height="586" rx="84"/>
+    <rect x="270" y="206" width="498" height="384" rx="100"/>
+  </g>
+</svg>

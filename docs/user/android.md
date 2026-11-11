@@ -37,7 +37,13 @@ Saved sign-ins are encrypted with a key kept in the phone's secure hardware (the
 
 PeetMail asks to send notifications after you sign in. If you said no, **Settings → Notifications & startup** has a button to open Android's settings and allow them. Tap a notification to open that conversation.
 
-For now PeetMail checks for mail while it's open, and as soon as you switch back to it. Checking with PeetMail closed is coming.
+## Checking for mail with PeetMail closed
+
+PeetMail checks for mail every 15 minutes while it's closed, and as soon as you switch back to it. Each check also sends anything waiting to go (including messages scheduled to send later) and brings back snoozed conversations whose time has come, with a reminder.
+
+Change how often under **Settings → Notifications & startup → Check for mail**: every 15 minutes, every hour, or only when PeetMail is open.
+
+Android decides when the checks actually run, and holds them back to save battery, especially when the phone has been lying still for a while. So mail, sends and snooze reminders can arrive later than the setting says. For checks on time, set PeetMail's **App battery usage** to **Unrestricted**: the **Battery** button under the setting opens PeetMail's page in Android's settings.
 
 ## Not on Android (yet)
 

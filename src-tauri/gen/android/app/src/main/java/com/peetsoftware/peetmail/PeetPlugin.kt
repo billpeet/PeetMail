@@ -8,8 +8,6 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.provider.Settings
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.webkit.MimeTypeMap
 import android.webkit.WebView
@@ -22,18 +20,14 @@ import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import org.json.JSONObject
 import java.io.File
-import java.security.KeyStore
 import java.util.UUID
-import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
-import javax.crypto.SecretKey
-import javax.crypto.spec.GCMParameterSpec
 
 /**
  * What PeetMail's Rust core can't do on Android by itself (docs/ANDROID.md Stage 4), called
  * from src-tauri/src/android.rs:
  * - wrap/unwrap the key for saved sign-ins with a key that never leaves the Android Keystore;
  * - open, save and share files through content URIs;
+ * - schedule the background check (SyncWorker);
  * - catch what other apps hand PeetMail: "Share → PeetMail", the sign-in redirect, and taps on
  *   its notifications. These wait in `pending` until the page asks for them (`takePending`);
  *   the page is told to ask by a `peetmail-pending` event.
@@ -54,29 +48,12 @@ class PeetPlugin(private val activity: Activity) : Plugin(activity) {
 
   // ----- the Keystore -----
 
-  private fun keystoreKey(): SecretKey {
-    val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-    (store.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
-    val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
-    gen.init(
-      KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-        .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-        .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-        .setKeySize(256)
-        .build()
-    )
-    return gen.generateKey()
-  }
-
   /** `data` (base64) encrypted with the Keystore key: the 12-byte nonce, then the sealed bytes. */
   @Command
   fun wrap(invoke: Invoke) {
     try {
       val data = Base64.decode(invoke.getArgs().getString("data"), Base64.NO_WRAP)
-      val cipher = Cipher.getInstance(TRANSFORMATION)
-      cipher.init(Cipher.ENCRYPT_MODE, keystoreKey())
-      val out = cipher.iv + cipher.doFinal(data)
-      invoke.resolve(JSObject().put("data", Base64.encodeToString(out, Base64.NO_WRAP)))
+      invoke.resolve(JSObject().put("data", Base64.encodeToString(SignInKey.wrap(data), Base64.NO_WRAP)))
     } catch (e: Exception) {
       invoke.reject("Android Keystore: ${e.message}")
     }
@@ -86,15 +63,11 @@ class PeetPlugin(private val activity: Activity) : Plugin(activity) {
   fun unwrap(invoke: Invoke) {
     try {
       val blob = Base64.decode(invoke.getArgs().getString("data"), Base64.NO_WRAP)
-      val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-      val key = store.getKey(KEY_ALIAS, null) as? SecretKey
-      if (key == null) {
+      val out = SignInKey.unwrap(blob)
+      if (out == null) {
         invoke.reject("the Android Keystore key is gone", "missing")
         return
       }
-      val cipher = Cipher.getInstance(TRANSFORMATION)
-      cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, blob, 0, 12))
-      val out = cipher.doFinal(blob, 12, blob.size - 12)
       invoke.resolve(JSObject().put("data", Base64.encodeToString(out, Base64.NO_WRAP)))
     } catch (e: Exception) {
       invoke.reject("Android Keystore: ${e.message}")
@@ -177,6 +150,31 @@ class PeetPlugin(private val activity: Activity) : Plugin(activity) {
     }
   }
 
+  /** Runs the background check every `minutes` (0: never). See SyncWorker. */
+  @Command
+  fun scheduleSync(invoke: Invoke) {
+    try {
+      SyncWorker.schedule(activity.applicationContext, invoke.getArgs().optInt("minutes", 15))
+      invoke.resolve()
+    } catch (e: Exception) {
+      invoke.reject(e.message)
+    }
+  }
+
+  /** PeetMail's page in Android's settings: "App battery usage" there lets the background
+   *  check run on time. */
+  @Command
+  fun openBatterySettings(invoke: Invoke) {
+    try {
+      activity.startActivity(
+        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", activity.packageName, null))
+      )
+      invoke.resolve()
+    } catch (e: Exception) {
+      invoke.reject(e.message)
+    }
+  }
+
   /** Android's notification settings for PeetMail (after the permission was refused). */
   @Command
   fun openNotificationSettings(invoke: Invoke) {
@@ -213,6 +211,10 @@ class PeetPlugin(private val activity: Activity) : Plugin(activity) {
         intent.action == Intent.ACTION_SEND || intent.action == Intent.ACTION_SEND_MULTIPLE ->
           "shared" to shared(intent)
         intent.hasExtra(NOTIFICATION_KEY) -> notificationTarget(intent)?.let { "open" to it }
+        intent.hasExtra(SyncWorker.EXTRA_CONVERSATION) -> JSObject()
+          .put("accountId", intent.getLongExtra(SyncWorker.EXTRA_ACCOUNT, 0))
+          .put("conversationId", intent.getStringExtra(SyncWorker.EXTRA_CONVERSATION))
+          .let { "open" to it }
         else -> null
       }
     } catch (e: Exception) {
@@ -270,8 +272,6 @@ class PeetPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
   companion object {
-    private const val KEY_ALIAS = "peetmail-sign-ins"
-    private const val TRANSFORMATION = "AES/GCM/NoPadding"
     private const val HANDLED = "com.peetsoftware.peetmail.handled"
     /** tauri-plugin-notification's extra holding the tapped notification (TauriNotificationManager.kt). */
     private const val NOTIFICATION_KEY = "LocalNotficationObject"

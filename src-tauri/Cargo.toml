@@ -73,6 +73,9 @@ libc = "0.2"
 [target.'cfg(target_os = "android")'.dependencies]
 # Calls into the activity (commands::move_to_background); the version wry hands us.
 jni = "0.21"
+# Logging when Android starts PeetMail only for its background check (background.rs);
+# the version tauri-plugin-log uses.
+android_logger = "0.15"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

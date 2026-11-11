@@ -21,7 +21,7 @@ PeetMail on Android phones, built from the same Tauri 2 app: the Rust core uncha
 | 2 Compact layout (testable on Windows) | Done |
 | 3 Touch: gestures, sheets, back button | Done |
 | 4 Phone-native plumbing (files, share, notifications, secure storage) | Done (the Microsoft deep link waits on its redirect URI being registered) |
-| 5 Background sync | Not started |
+| 5 Background sync | Done (emulator) |
 | 6 Distribution | Not started |
 
 ## Decisions
@@ -150,10 +150,36 @@ Not done:
 
 ## Stage 5: background sync (required for v1)
 
-- A WorkManager periodic job (15 min, network required) that starts the Rust core headless and runs one `outbox::kick` + `mail::sync_all`, then raises new-mail notifications.
-- Needs a refactor first: `sync_all` and the outbox take an `AppHandle` today. Split out a core context (`Db`, HTTP clients, an event sink) that the Tauri app and the worker both build, so the worker doesn't need a webview.
-- Must coexist with a foreground app process (the database is already one connection behind a mutex; the worker either skips when the app is open or goes through the same process).
-- Battery: one delta request per folder per run, same as desktop. Settings gets "Check for mail: every 15 min / hourly / only when open".
+A WorkManager job, `SyncWorker.kt`, runs every 15 minutes (or hourly, or never: Settings → Check for mail, `check_mail`, a per-device setting) whenever there's a network. Android lets PeetMail use the network for the length of the job. The work is all in Rust: the job calls `background.rs` over JNI (`SyncWorker.runOnce`). One run:
+
+1. brings back due snoozes, with their reminders;
+2. drains the outbox, scheduled sends included, but stops waiting for anything more than 15 s away instead of watching the queue;
+3. syncs every account (no body prefetch);
+4. returns the notifications, which Kotlin shows. They go on tauri-plugin-notification's channel, and a tap opens the conversation through `PeetPlugin.onIntent`.
+
+**The core context.** Sync, the outbox and notifications used to take an `AppHandle`. They now take a `context::Core`: either the running app, or a *headless* state that the job builds when Android started the process just for it, with no activity and no Tauri app. A headless run opens the database itself, and its events go nowhere. Kotlin unwraps the key for saved sign-ins (`SignInKey.kt`), because there's no plugin to ask. When the app is already running in the background, the run uses its state, and the app hears its events, so the list is current when you come back. When the app is in front the job does nothing, because the app syncs on its own timer.
+
+**Sharing a process.** The app's activity can start while a headless run is going, so two `AppState`s (two SQLite connections) can share one process:
+- The sync and outbox locks are process-wide statics.
+- Startup resets in-flight sends only if it can take the outbox lock. Otherwise the job may be mid-send, and resetting would send the message twice.
+- Neither side holds the database for long, and SQLite's WAL lets the two connections share the file.
+
+The core is behind a trait object, so the Rust unit tests (which build only headless cores) don't link Tauri's runtime; Windows won't even load a test binary that does.
+
+Checked on the emulator, waiting for real scheduled runs (WorkManager won't let `cmd jobscheduler run -f` start a periodic job early):
+- with PeetMail killed: the job started a process with no activity, synced, and posted its notification;
+- with PeetMail in the background, in the same process: new mail notified, and a tap opened the conversation;
+- with PeetMail in front: skipped.
+
+The killed case first crashed: `block_on` polled sync on WorkManager's own thread, whose Java-sized stack a debug build's futures overflow (in rustls's certificate check). The JNI entry now runs each check on a thread of its own with an 8 MiB stack.
+
+Installing an update clears the job until PeetMail next opens; it schedules on every start.
+
+Also in this stage, **the launcher icon**. `tauri icon` had made the whole desktop tile the adaptive icon's foreground, on white, so a round mask clipped it into a haloed, oversized P. `pnpm icons` now writes Android's icon itself: the P alone inside the safe zone (`icons/source/peetmail-android.svg`) on white, plus a monochrome layer for themed icons. It's white, not the desktop's dark tile, because Pixel's launcher rings every icon in a pale tint of its colours: invisible on white, a halo around anything dark.
+
+Not done:
+- Exact-time snooze reminders and scheduled sends with PeetMail closed. They run on the job's schedule, so they can be 15 minutes or more late (longer in Doze). Exact times would need `AlarmManager` and the exact-alarm permission. Revisit after real use.
+- The last sync time isn't shown on the list yet (see Risks).
 
 ## Stage 6: distribution
 

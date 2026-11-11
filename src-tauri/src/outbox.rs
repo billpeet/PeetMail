@@ -9,7 +9,7 @@ use reqwest::Method;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager};
+use crate::context::Core;
 
 use crate::error::{AppError, Result};
 use crate::graph::{self, PREFER_IMMUTABLE};
@@ -378,18 +378,26 @@ fn next_due_in(conn: &Connection) -> Result<Option<Duration>> {
 // ---------- worker ----------
 
 /// Starts draining the queue unless a drain is already running.
-pub fn kick(app: &AppHandle) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let state = app.state::<AppState>();
-        let Ok(_guard) = state.outbox_lock.try_lock() else { return };
-        if let Err(e) = drain(&app, &state).await {
-            log::error!("outbox drain: {e}");
-        }
-    });
+pub fn kick(app: impl Into<Core>) {
+    let app = app.into();
+    tauri::async_runtime::spawn(async move { drain_now(&app).await });
 }
 
-async fn drain(app: &AppHandle, state: &AppState) -> Result<()> {
+/// Drains the queue unless a drain is already running, and returns when it's done. A
+/// background run stops once nothing is due within a few seconds, instead of watching.
+pub async fn drain_now(app: &Core) {
+    let state = app.state();
+    let Ok(_guard) = state.outbox_lock.try_lock() else { return };
+    if let Err(e) = drain(app, state).await {
+        log::error!("outbox drain: {e}");
+    }
+}
+
+/// How far ahead a background run waits for an op (a send's undo delay), rather than
+/// leave it to the next run.
+const BACKGROUND_WAIT: Duration = Duration::from_secs(15);
+
+async fn drain(app: &Core, state: &AppState) -> Result<()> {
     let mut sent_any = false;
     loop {
         let Some(row) = state.db.with(|c| take_due(c))? else {
@@ -401,6 +409,7 @@ async fn drain(app: &AppHandle, state: &AppState) -> Result<()> {
                 sync_soon(app); // don't hold it back while a later op waits
             }
             match state.db.with(|c| next_due_in(c))? {
+                Some(wait) if app.is_background() && wait > BACKGROUND_WAIT => break,
                 Some(wait) => {
                     tokio::time::sleep(wait.min(Duration::from_secs(1)) + Duration::from_millis(20)).await;
                     continue;
@@ -492,7 +501,11 @@ async fn drain(app: &AppHandle, state: &AppState) -> Result<()> {
 }
 
 /// Pulls the server's view (sent copies, moved folders) promptly after ops went out.
-fn sync_soon(app: &AppHandle) {
+fn sync_soon(app: &Core) {
+    // A background run syncs once the outbox is done anyway.
+    if app.is_background() {
+        return;
+    }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let _ = mail::sync_all(&app).await;
@@ -503,7 +516,8 @@ fn is_permanent(e: &AppError) -> bool {
     matches!(e, AppError::Graph { status, .. } if (400..500).contains(status) && *status != 408 && *status != 429)
 }
 
-pub fn emit_status(app: &AppHandle, state: &AppState) {
+pub fn emit_status(app: impl Into<Core>, state: &AppState) {
+    let app = app.into();
     if let Ok(s) = state.db.with(|c| status(c)) {
         let _ = app.emit(EVENT_OUTBOX, s);
     }

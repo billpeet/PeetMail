@@ -40,6 +40,8 @@ const LOCAL: &[&str] = &[
     "layout",
     "list_width",
     "close_to_tray",
+    // How often a phone checks in the background is that phone's business.
+    "check_mail",
     "privacy_notice_seen",
     "changelog_seen",
     "crash_reports",

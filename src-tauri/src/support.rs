@@ -34,6 +34,7 @@ const SAFE_SETTINGS: &[&str] = &[
     "body_cache_mb",
     "notify",
     "close_to_tray",
+    "check_mail",
     "undo_send_secs",
     "week_starts_on",
     "show_right_pane",

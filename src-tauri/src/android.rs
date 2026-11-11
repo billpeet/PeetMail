@@ -143,3 +143,15 @@ pub struct Pending {
 pub async fn take_pending() -> Result<Pending> {
     call_async("takePending", json!({})).await
 }
+
+/// Runs the background check every `minutes` (WorkManager, `SyncWorker.kt`), or never.
+/// Blocks on Kotlin: never from the main thread.
+pub fn schedule_sync(minutes: Option<u32>) -> Result<()> {
+    call::<Value>("scheduleSync", json!({ "minutes": minutes.unwrap_or(0) })).map(|_| ())
+}
+
+/// PeetMail's page in Android's settings, where its battery use can be set to unrestricted
+/// so the background check runs on time.
+pub async fn open_battery_settings() -> Result<()> {
+    call_async::<Value>("openBatterySettings", json!({})).await.map(|_| ())
+}

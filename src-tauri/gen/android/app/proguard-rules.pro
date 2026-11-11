@@ -19,3 +19,6 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+# The background check calls into Rust by this name (src-tauri/src/background.rs).
+-keepclasseswithmembernames class com.peetsoftware.peetmail.SyncWorker$Companion { native <methods>; }
+-keepclasseswithmembernames class com.peetsoftware.peetmail.SyncWorker { native <methods>; }

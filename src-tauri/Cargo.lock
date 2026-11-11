@@ -3493,6 +3493,7 @@ name = "peetmail"
 version = "0.2.1"
 dependencies = [
  "ammonia",
+ "android_logger",
  "argon2",
  "base64 0.23.1",
  "chrono",

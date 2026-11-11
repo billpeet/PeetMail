@@ -10,7 +10,7 @@ use chrono::{Duration, NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter};
+use crate::context::Core;
 use url::Url;
 
 use crate::error::{AppError, Result};
@@ -354,7 +354,7 @@ fn initial_url(start: &str, end: &str) -> String {
 
 /// Brings the account's events up to date. A full sync (first run, new window, or an
 /// expired delta link) sweeps away events the server no longer reports.
-pub async fn sync_account(app: &AppHandle, state: &AppState, account_id: i64) -> Result<()> {
+pub async fn sync_account(app: &Core, state: &AppState, account_id: i64) -> Result<()> {
     let stored = state.db.with(|c| sync_state(c, account_id))?;
     let mut sync = match stored {
         Some(s) if !window_is_stale(&s.window_start, &s.window_end) => s,

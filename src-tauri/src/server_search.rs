@@ -64,7 +64,7 @@ pub async fn search(app: &AppHandle, state: &AppState, input: &str, hidden: &[i6
     for a in &accounts {
         let result = if a.provider == "google" {
             let Some(q) = query::gmail_search(input) else { continue };
-            gmail::search_server(app, state, a.id, &q, LIMIT, generation).await
+            gmail::search_server(&app.into(), state, a.id, &q, LIMIT, generation).await
         } else {
             let Some(kql) = query::graph_search(input) else { continue };
             mail::search_server(state, a.id, &kql, LIMIT, generation).await

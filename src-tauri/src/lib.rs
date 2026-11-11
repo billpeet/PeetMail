@@ -2,8 +2,10 @@ mod actions;
 #[cfg(target_os = "android")]
 mod android;
 mod auth;
+mod background;
 mod calendar;
 mod commands;
+mod context;
 mod crash;
 mod datadir;
 mod db;
@@ -40,7 +42,7 @@ mod update;
 
 use std::time::Duration;
 
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 /// Delta polls are cheap; Graph change notifications need a public webhook,
 /// which a desktop app doesn't have.
@@ -374,7 +376,12 @@ pub fn run() {
                 Ok(db) => db,
                 Err(e) => fatal_startup_error(&e.to_string()),
             };
-            db.with(|c| outbox::reset_inflight(c))?;
+            // Sends a process stopped midway go again. Not while a background job (Android)
+            // in this process is sending right now: it finishes them.
+            match state::OUTBOX_LOCK.try_lock() {
+                Ok(_idle) => db.with(|c| outbox::reset_inflight(c))?,
+                Err(_) => log::info!("a background check is sending; leaving its sends to it"),
+            }
             // A server search still open when the app closed: what it fetched goes again.
             db.with(|c| db::clear_search_cache(c))?;
             // Drafts changed here that never reached the server get another go.
@@ -397,6 +404,13 @@ pub fn run() {
                 Err(e) => log::error!("telemetry: reading settings: {e}"),
             }
             app.manage(state::AppState::new(db));
+            #[cfg(target_os = "android")]
+            {
+                background::set_app(app.handle());
+                let handle = app.handle().clone();
+                // Blocks on Kotlin: off the main thread.
+                std::thread::spawn(move || background::schedule(&handle.state::<state::AppState>()));
+            }
             update::init(app.handle());
             health::start(app.handle());
             create_main_window(app, dev_data)?;
@@ -409,30 +423,10 @@ pub fn run() {
             }
 
             // Snoozes wake on time: a cheap indexed check each second.
-            let snoozer = app.handle().clone();
+            let snoozer = context::Core::from(app.handle());
             tauri::async_runtime::spawn(async move {
                 loop {
-                    let state = snoozer.state::<state::AppState>();
-                    match state.db.with(|c| actions::wake(c, None)) {
-                        Ok(woke) if !woke.is_empty() => {
-                            telemetry::count("peetmail.snooze.woke", woke.len() as u64, &[]);
-                            outbox::emit_status(&snoozer, &state);
-                            outbox::kick(&snoozer);
-                            let mut accounts: Vec<i64> = woke.iter().map(|w| w.0).collect();
-                            accounts.dedup();
-                            for a in accounts {
-                                let _ = snoozer.emit(mail::EVENT_MAIL_CHANGED, serde_json::json!({ "accountId": a, "folderId": null }));
-                            }
-                            if state.preferences().map(|p| p.notify != "off").unwrap_or(true) {
-                                match state.db.with(|c| notify::reminder_toasts(c, &woke)) {
-                                    Ok(t) => notify::show(&snoozer, t),
-                                    Err(e) => log::error!("reminder notifications: {e}"),
-                                }
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(e) => log::error!("waking snoozes: {e}"),
-                    }
+                    background::wake_snoozes(&snoozer);
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             });
@@ -517,6 +511,7 @@ pub fn run() {
             commands::take_pending,
             commands::notification_permission,
             commands::open_notification_settings,
+            commands::open_battery_settings,
             commands::open_external,
             commands::debug_panic,
             commands::set_snippets,

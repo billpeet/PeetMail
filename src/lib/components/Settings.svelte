@@ -4,7 +4,7 @@
   import { onMount } from "svelte";
   import { Bell, CalendarDays, Cloud, HardDrive, KeyRound, Mail, RefreshCw, ShieldCheck, Users } from "@lucide/svelte";
   import { api } from "#lib/api.js";
-  import type { Privacy, UpdateChannel } from "#lib/api.js";
+  import type { CheckMail, Privacy, UpdateChannel } from "#lib/api.js";
   import { keymap } from "#lib/keys.svelte.js";
   import { autostartLabel, isDesktop } from "#lib/platform.js";
   import { mail, type SettingsPage } from "#lib/mail.svelte.js";
@@ -220,6 +220,21 @@
         <SettingRow label={autostartLabel().label} hint={autostartLabel().hint}>
           <input type="checkbox" data-testid="autostart" checked={autostart} onchange={(e) => setAutostart(e.currentTarget.checked)} class="size-4 accent-accent" />
         </SettingRow>
+      </SettingsCard>
+      {:else}
+      <SettingsCard>
+        <SettingRow label="Check for mail" hint="With PeetMail closed. Android may wait longer to save battery.">
+          <select data-testid="check-mail-select" value={mail.boot?.preferences.checkMail ?? "15"} onchange={(e) => mail.setPreference("checkMail", e.currentTarget.value as CheckMail)} class={select}>
+            <option value="15">Every 15 minutes</option>
+            <option value="60">Every hour</option>
+            <option value="open">Only when open</option>
+          </select>
+        </SettingRow>
+        {#if mail.boot?.preferences.checkMail !== "open"}
+          <SettingRow label="Battery" hint="Set PeetMail's App battery usage to Unrestricted, and Android checks on time.">
+            <button data-testid="battery-settings" onclick={() => api.openBatterySettings()} class="rounded-md border border-ink-700 px-3 py-1.5 text-sm text-ink-300 hover:text-ink-100">Open settings</button>
+          </SettingRow>
+        {/if}
       </SettingsCard>
       {/if}
     {:else if page === "storage"}

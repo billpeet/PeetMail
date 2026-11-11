@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108">
+  <!-- Android adaptive icon foreground: the P from peetmail.svg alone on a 108 dp canvas, well
+       inside the 66 dp circle every launcher mask leaves visible. It sits on white
+       (drawable/ic_launcher_background.xml, written by scripts/icons.ts) like the system apps':
+       Pixel's launcher rings each icon in a pale tint of its colours, which haloes anything but white.
+       So the P is a shade deeper than the desktop's, to hold up on white. -->
+  <defs>
+    <linearGradient id="cap" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9ba2ff"/><stop offset="1" stop-color="#6b73ea"/></linearGradient>
+  </defs>
+  <g transform="translate(54 54) scale(0.074) translate(-519 -522)">
+    <rect x="270" y="252" width="168" height="586" rx="84" fill="#454cb4"/>
+    <rect x="270" y="252" width="498" height="384" rx="100" fill="#454cb4"/>
+    <rect x="270" y="206" width="168" height="586" rx="84" fill="url(#cap)"/>
+    <rect x="270" y="206" width="498" height="384" rx="100" fill="url(#cap)"/>
+    <path d="M 356 304 L 530 432 L 704 304" fill="none" stroke="#ffffff" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

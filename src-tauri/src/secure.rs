@@ -85,6 +85,13 @@ pub fn warm() -> Result<()> {
     linux::key(true).map(|_| ())
 }
 
+/// The key, already out of the Keystore: a background job (background.rs) whose process
+/// has no Tauri app, so no plugin to ask, gets it from Kotlin.
+#[cfg(target_os = "android")]
+pub fn provide_key(key: [u8; 32]) {
+    linux::provide(key);
+}
+
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn unprotect(data: &[u8]) -> Result<Vec<u8>> {
     sealed::open(&linux::key(false)?, data)
@@ -215,6 +222,11 @@ mod linux {
                 Err(e)
             }
         }
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn provide(key: [u8; 32]) {
+        *KEY.lock().unwrap_or_else(|e| e.into_inner()) = Some(key);
     }
 
     /// Why the keyring couldn't help.

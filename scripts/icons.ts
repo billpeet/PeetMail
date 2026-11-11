@@ -5,13 +5,16 @@
 //
 // `tauri icon` makes the full set from the master; this keeps only the files the repo uses,
 // swaps the hand-tuned sizes into icon.ico, and writes 32x32.png and tray.png from them.
-// The Android launcher icons (adaptive, every density) go into src-tauri/gen/android.
+// The Android launcher icons go into src-tauri/gen/android: an adaptive icon whose
+// foreground is the P alone (peetmail-android.svg, inside the launcher's safe zone) on a
+// light background, plus a monochrome layer for themed icons (peetmail-android-mono.svg).
+// `tauri icon` would put the whole rounded tile on white, which a round mask clips badly.
 // The small SVGs are rendered with Edge (installed with Windows) through Playwright.
 //
 //   pnpm icons
 
 import { spawnSync } from "node:child_process";
-import { copyFileSync, cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "@playwright/test";
@@ -21,6 +24,23 @@ const ICONS = "src-tauri/icons";
 const SOURCE = `${ICONS}/source`;
 const HAND_TUNED = [16, 24, 32];
 const ANDROID_RES = "src-tauri/gen/android/app/src/main/res";
+/** Adaptive icon layers are 108 dp square. */
+const ANDROID_DENSITIES: Record<string, number> = { mdpi: 1, hdpi: 1.5, xhdpi: 2, xxhdpi: 3, xxxhdpi: 4 };
+const ADAPTIVE_ICON = `<?xml version="1.0" encoding="utf-8"?>
+<!-- Written by scripts/icons.ts (pnpm icons). -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+  <background android:drawable="@drawable/ic_launcher_background"/>
+  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
+  <monochrome android:drawable="@mipmap/ic_launcher_monochrome"/>
+</adaptive-icon>
+`;
+/** White, full bleed (the launcher's mask shapes it): see peetmail-android.svg for why. */
+const ADAPTIVE_BACKGROUND = `<?xml version="1.0" encoding="utf-8"?>
+<!-- Written by scripts/icons.ts (pnpm icons). -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+  <solid android:color="#ffffff"/>
+</shape>
+`;
 
 const out = mkdtempSync(join(tmpdir(), "peetmail-icons-"));
 try {
@@ -42,6 +62,26 @@ try {
     const svg = readFileSync(`${SOURCE}/peetmail-${size}.svg`).toString("base64");
     await page.setContent(`<body style="margin:0"><img id="i" src="data:image/svg+xml;base64,${svg}" width="${size}" height="${size}" style="display:block"></body>`);
     small.push({ size, data: await page.locator("#i").screenshot({ omitBackground: true }) });
+  }
+  if (existsSync(ANDROID_RES)) {
+    const layers = [
+      ["ic_launcher_foreground", "peetmail-android.svg"],
+      ["ic_launcher_monochrome", "peetmail-android-mono.svg"],
+    ];
+    for (const [name, file] of layers) {
+      const svg = readFileSync(`${SOURCE}/${file}`).toString("base64");
+      for (const [density, scale] of Object.entries(ANDROID_DENSITIES)) {
+        const size = Math.round(108 * scale);
+        await page.setContent(`<body style="margin:0"><img id="i" src="data:image/svg+xml;base64,${svg}" width="${size}" height="${size}" style="display:block"></body>`);
+        mkdirSync(`${ANDROID_RES}/mipmap-${density}`, { recursive: true });
+        writeFileSync(`${ANDROID_RES}/mipmap-${density}/${name}.png`, await page.locator("#i").screenshot({ omitBackground: true }));
+      }
+    }
+    mkdirSync(`${ANDROID_RES}/drawable`, { recursive: true });
+    writeFileSync(`${ANDROID_RES}/drawable/ic_launcher_background.xml`, ADAPTIVE_BACKGROUND);
+    writeFileSync(`${ANDROID_RES}/mipmap-anydpi-v26/ic_launcher.xml`, ADAPTIVE_ICON);
+    // tauri icon's color resource of the same name would clash with the drawable.
+    rmSync(`${ANDROID_RES}/values/ic_launcher_background.xml`, { force: true });
   }
   await browser.close();
 

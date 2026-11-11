@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use reqwest::Method;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter};
+use crate::context::Core;
 
 use crate::calendar::{self, EventUpsert, Invite};
 use crate::error::{AppError, Result};
@@ -125,7 +125,7 @@ pub fn parse_event(v: &Value) -> Option<EventUpsert> {
 
 // ---------- sync ----------
 
-pub async fn sync_account(app: &AppHandle, state: &AppState, account_id: i64) -> Result<()> {
+pub async fn sync_account(app: &Core, state: &AppState, account_id: i64) -> Result<()> {
     let stored = state.db.with(|c| calendar::sync_state(c, account_id))?;
     let mut sync = match stored {
         Some(s) if !calendar::window_is_stale(&s.window_start, &s.window_end) => s,

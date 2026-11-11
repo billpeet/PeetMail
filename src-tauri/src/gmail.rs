@@ -22,7 +22,7 @@ use base64::Engine;
 use chrono::{Duration, TimeZone, Utc};
 use reqwest::Method;
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager};
+use crate::context::Core;
 
 use crate::db::{self, MessageUpsert};
 use crate::error::{AppError, Result};
@@ -571,7 +571,7 @@ fn backfill_key(name: &str, account_id: i64) -> String {
     format!("{name}:{account_id}")
 }
 
-pub async fn sync_account(app: &AppHandle, state: &AppState, account_id: i64) -> Result<()> {
+pub async fn sync_account(app: &Core, state: &AppState, account_id: i64) -> Result<()> {
     let start = state.db.with(|c| db::get_setting(c, &history_key(account_id)))?;
     let Some(h) = start else { return full(app, state, account_id).await };
     match incremental(app, state, account_id, &h).await {
@@ -616,7 +616,7 @@ async fn list_ids(state: &AppState, account_id: i64, listing: &str, after: i64) 
 
 /// Fetches and stores messages in small chunks, in order, so lists fill in as it goes.
 /// Returns how many fetches failed.
-async fn fetch_and_store(app: &AppHandle, state: &AppState, account_id: i64, ids: &[String]) -> Result<usize> {
+async fn fetch_and_store(app: &Core, state: &AppState, account_id: i64, ids: &[String]) -> Result<usize> {
     let mut failed = 0;
     for chunk in ids.chunks(50) {
         let fetched = fetch_many(app, account_id, chunk.to_vec()).await;
@@ -630,7 +630,7 @@ async fn fetch_and_store(app: &AppHandle, state: &AppState, account_id: i64, ids
 }
 
 /// Lists one kind of mail once (`BACKFILLS`), for accounts synced before PeetMail kept it.
-async fn backfill(app: &AppHandle, state: &AppState, account_id: i64, listing: &str, key: &str) -> Result<()> {
+async fn backfill(app: &Core, state: &AppState, account_id: i64, listing: &str, key: &str) -> Result<()> {
     let after = (Utc::now() - Duration::days(state.cache_limits()?.cache_days)).timestamp();
     let ids = list_ids(state, account_id, listing, after).await?;
     let known: HashSet<String> = state.db.with(|c| {
@@ -648,7 +648,7 @@ async fn backfill(app: &AppHandle, state: &AppState, account_id: i64, listing: &
 }
 
 /// Fetches message resources, a few at a time. Missing messages come back as Err(404).
-async fn fetch_many(app: &AppHandle, account_id: i64, ids: Vec<String>) -> Vec<(String, Result<Value>)> {
+async fn fetch_many(app: &Core, account_id: i64, ids: Vec<String>) -> Vec<(String, Result<Value>)> {
     let mut set = tokio::task::JoinSet::new();
     let mut queue = ids.into_iter();
     let bg = in_background();
@@ -656,8 +656,8 @@ async fn fetch_many(app: &AppHandle, account_id: i64, ids: Vec<String>) -> Vec<(
         let app = app.clone();
         // Spawned tasks don't inherit task-locals: carry the background flag over.
         set.spawn(BACKGROUND.scope(bg, async move {
-            let state = app.state::<AppState>();
-            let r = get(&state, account_id, &format!("{}/messages/{id}?{METADATA}", base())).await;
+            let state = app.state();
+            let r = get(state, account_id, &format!("{}/messages/{id}?{METADATA}", base())).await;
             (id, r)
         }));
     };
@@ -735,7 +735,7 @@ fn incomplete(failed: usize) -> AppError {
     AppError::Other(format!("couldn't fetch {failed} Gmail message(s); will retry on the next sync"))
 }
 
-fn changed_event(app: &AppHandle, account_id: i64) {
+fn changed_event(app: &Core, account_id: i64) {
     let _ = app.emit(mail::EVENT_MAIL_CHANGED, json!({ "accountId": account_id, "folderId": null }));
 }
 
@@ -744,7 +744,7 @@ fn changed_event(app: &AppHandle, account_id: i64) {
 /// Searches the whole mailbox (Gmail's `q`, from `query::gmail_search`; spam and trash are
 /// left out, as in Gmail) and keeps what it finds for the open search. Returns how many
 /// messages it found.
-pub async fn search_server(app: &AppHandle, state: &AppState, account_id: i64, q: &str, limit: usize, generation: u64) -> Result<usize> {
+pub async fn search_server(app: &Core, state: &AppState, account_id: i64, q: &str, limit: usize, generation: u64) -> Result<usize> {
     let page = get(state, account_id, &format!("{}/messages?q={}&maxResults={limit}", base(), urlencode(q))).await?;
     let ids: Vec<String> = page["messages"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str().map(String::from)).collect();
     let fetched = fetch_many(app, account_id, ids).await;
@@ -785,7 +785,7 @@ fn keep_search_results(state: &AppState, account_id: i64, fetched: &[(String, Re
     })
 }
 
-async fn full(app: &AppHandle, state: &AppState, account_id: i64) -> Result<()> {
+async fn full(app: &Core, state: &AppState, account_id: i64) -> Result<()> {
     // The historyId from before listing, so anything that changes meanwhile shows up next time.
     let profile = get(state, account_id, &format!("{}/profile", base())).await?;
     let history = profile["historyId"].as_str().map(String::from).ok_or_else(|| AppError::Other("Gmail profile has no historyId".into()))?;
@@ -829,7 +829,7 @@ async fn full(app: &AppHandle, state: &AppState, account_id: i64) -> Result<()> 
     Ok(())
 }
 
-async fn incremental(app: &AppHandle, state: &AppState, account_id: i64, start: &str) -> Result<()> {
+async fn incremental(app: &Core, state: &AppState, account_id: i64, start: &str) -> Result<()> {
     let mut changed: Vec<String> = Vec::new();
     let mut changed_set = HashSet::new();
     let mut deleted = HashSet::new();
@@ -896,7 +896,7 @@ async fn incremental(app: &AppHandle, state: &AppState, account_id: i64, start: 
     Ok(())
 }
 
-fn prune(app: &AppHandle, state: &AppState, account_id: i64) -> Result<()> {
+fn prune(app: &Core, state: &AppState, account_id: i64) -> Result<()> {
     let days = state.cache_limits()?.cache_days;
     let cutoff = (Utc::now() - Duration::days(days)).format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let pruned = state.db.with(|c| {
