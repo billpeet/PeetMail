@@ -167,6 +167,10 @@ impl AppState {
         };
         Ok(if provider == "google" {
             auth::OAuthConfig::google(&client.0, client.1.as_deref())
+        } else if app != APP_CUSTOM && cfg!(target_os = "android") {
+            // Only the built-in app has PeetMail's own redirect registered; your own app keeps
+            // the loopback redirect, which needs nothing extra registered.
+            auth::OAuthConfig::microsoft(&client.0).with_app_redirect()
         } else {
             auth::OAuthConfig::microsoft(&client.0)
         })

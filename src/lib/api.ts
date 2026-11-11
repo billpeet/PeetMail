@@ -133,6 +133,11 @@ export type DraftDoc = {
 export type SavedDraft = { id: number; accountId: number; updatedAt: string; draft: DraftDoc };
 /** A file attached in the composer (its bytes wait in Rust until the message has gone). */
 export type DraftFile = { id: number; name: string; mime: string; size: number };
+
+/** Shared to PeetMail from another app; the files are already draft attachments. */
+export type Shared = { subject: string | null; text: string | null; files: DraftFile[]; failed: string[] };
+export type Pending = { shared: Shared | null; open: ThreadRow | null };
+export type NotificationPermission = "granted" | "denied" | "prompt";
 export type SendOutcome = { id: number; sendAt: string; scheduled: boolean };
 export type Draft = {
   kind: DraftKind;
@@ -334,6 +339,11 @@ export const api = {
   quitApp: () => invoke<void>("quit_app"),
   /** Android: send PeetMail to the background, as back on an app's root screen does. */
   moveToBackground: () => invoke<void>("move_to_background"),
+  /** What another app handed PeetMail on Android (a share, a tapped notification). */
+  takePending: () => invoke<Pending>("take_pending"),
+  /** "granted" | "denied" | "prompt"; `ask` shows Android's prompt if it hasn't been answered. */
+  notificationPermission: (ask: boolean) => invoke<NotificationPermission>("notification_permission", { ask }),
+  openNotificationSettings: () => invoke<void>("open_notification_settings"),
   /** Opens a link in the browser / mail app (recorded instead in tests). */
   openExternal: (url: string) => invoke<void>("open_external", { url }),
   setSnippets: (snippets: Snippet[]) => invoke<Snippet[]>("set_snippets", { snippets }),

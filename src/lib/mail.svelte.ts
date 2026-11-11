@@ -843,7 +843,7 @@ class MailStore {
   }
 
   /** Opens a Recent Opens entry: selects it in the list if it's there, else pins it. */
-  async openRecent(r: RecentOpen) {
+  async openRecent(r: RecentOpen | ThreadRow) {
     this.search = null;
     this.#closeServerSearch();
     const index = this.threads.findIndex((t) => t.conversationId === r.conversationId && t.accountId === r.accountId);
@@ -1282,9 +1282,9 @@ class MailStore {
 
   // ---------- compose ----------
 
-  compose(prefill: { to?: string; subject?: string; body?: string } = {}) {
+  compose(prefill: { to?: string; subject?: string; body?: string; attachments?: DraftFile[] } = {}) {
     if (!this.account) return;
-    this.composer = { accountId: this.account.id, kind: "new", referenceMessageId: null, conversationId: null, to: prefill.to ?? "", cc: "", bcc: "", subject: prefill.subject ?? "", body: prefill.body ?? "", html: withSignature(textToHtml(prefill.body ?? ""), this.startingSignature(this.account.id, "new")), attachments: [], droppedAttachments: [], draftId: null };
+    this.composer = { accountId: this.account.id, kind: "new", referenceMessageId: null, conversationId: null, to: prefill.to ?? "", cc: "", bcc: "", subject: prefill.subject ?? "", body: prefill.body ?? "", html: withSignature(textToHtml(prefill.body ?? ""), this.startingSignature(this.account.id, "new")), attachments: prefill.attachments ?? [], droppedAttachments: [], draftId: null };
   }
 
   /** Reply, reply all or forward the newest message of the current conversation. */

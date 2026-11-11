@@ -74,8 +74,19 @@ pub fn take_new_mail(conn: &Connection, account_id: i64, my_address: &str, mode:
     Ok(out)
 }
 
-/// One toast: (title, body).
-pub type Toast = (String, String);
+/// One toast, and the conversation it's about, if it's about one (a tap opens it: Android).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Toast {
+    pub title: String,
+    pub body: String,
+    pub open: Option<(i64, String)>,
+}
+
+impl Toast {
+    fn new(title: String, body: String, open: Option<(i64, String)>) -> Self {
+        Self { title, body, open }
+    }
+}
 
 /// Up to three messages get a toast each; more become one summary.
 pub fn toasts_for(mail: &[NewMail]) -> Vec<Toast> {
@@ -85,7 +96,8 @@ pub fn toasts_for(mail: &[NewMail]) -> Vec<Toast> {
             .map(|m| {
                 let subject = if m.subject.is_empty() { "(no subject)" } else { &m.subject };
                 let preview: String = m.preview.chars().take(120).collect();
-                (m.from.clone(), if preview.is_empty() { subject.to_string() } else { format!("{subject}\n{preview}") })
+                let body = if preview.is_empty() { subject.to_string() } else { format!("{subject}\n{preview}") };
+                Toast::new(m.from.clone(), body, Some((m.account_id, m.conversation_id.clone())))
             })
             .collect();
     }
@@ -98,7 +110,7 @@ pub fn toasts_for(mail: &[NewMail]) -> Vec<Toast> {
     let shown = senders.iter().take(3).copied().collect::<Vec<_>>().join(", ");
     let more = senders.len().saturating_sub(3);
     let body = if more > 0 { format!("From {shown} and {more} more") } else { format!("From {shown}") };
-    vec![(format!("{} new messages", mail.len()), body)]
+    vec![Toast::new(format!("{} new messages", mail.len()), body, None)]
 }
 
 /// "Reminder" toasts for conversations a snooze just brought back.
@@ -114,7 +126,11 @@ pub fn reminder_toasts(conn: &Connection, woke: &[(i64, String)]) -> Result<Vec<
             )
             .ok();
         if let Some((from, subject)) = row {
-            out.push((format!("Reminder: {}", if subject.is_empty() { "(no subject)" } else { &subject }), format!("From {from}, back in your inbox")));
+            out.push(Toast::new(
+                format!("Reminder: {}", if subject.is_empty() { "(no subject)" } else { &subject }),
+                format!("From {from}, back in your inbox"),
+                Some((*account_id, conversation_id.clone())),
+            ));
         }
     }
     Ok(out)
@@ -140,15 +156,20 @@ pub fn show(app: &AppHandle, toasts: Vec<Toast>) {
     if let Some(path) = crate::testenv::get("PEETMAIL_NOTIFY_LOG") {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            for (title, body) in &toasts {
-                let _ = writeln!(f, "{}", serde_json::json!({ "title": title, "body": body }));
+            for t in &toasts {
+                let _ = writeln!(f, "{}", serde_json::json!({ "title": t.title, "body": t.body }));
             }
         }
         return;
     }
     use tauri_plugin_notification::NotificationExt;
-    for (title, body) in toasts {
-        if let Err(e) = app.notification().builder().title(title).body(body).show() {
+    for t in toasts {
+        let mut n = app.notification().builder().title(t.title).body(t.body);
+        // PeetPlugin.kt reads these back when the notification is tapped.
+        if let Some((account_id, conversation_id)) = t.open {
+            n = n.extra("accountId", account_id).extra("conversationId", conversation_id);
+        }
+        if let Err(e) = n.show() {
             log::warn!("notification failed: {e}");
         }
     }
@@ -238,8 +259,8 @@ mod tests {
     #[test]
     fn many_messages_become_one_summary() {
         let m = |from: &str| NewMail { account_id: 1, conversation_id: "c".into(), from: from.into(), subject: "Hi".into(), preview: "Body".into() };
-        assert_eq!(toasts_for(&[m("Sam")]), vec![("Sam".to_string(), "Hi\nBody".to_string())]);
+        assert_eq!(toasts_for(&[m("Sam")]), vec![Toast::new("Sam".into(), "Hi\nBody".into(), Some((1, "c".into())))]);
         let many = toasts_for(&[m("Sam"), m("Priya"), m("Sam"), m("Jo"), m("Ann")]);
-        assert_eq!(many, vec![("5 new messages".to_string(), "From Sam, Priya, Jo and 1 more".to_string())]);
+        assert_eq!(many, vec![Toast::new("5 new messages".into(), "From Sam, Priya, Jo and 1 more".into(), None)], "a summary opens nothing in particular");
     }
 }

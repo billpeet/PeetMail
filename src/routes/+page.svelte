@@ -34,6 +34,7 @@
   import { layout } from "#lib/layout.svelte.js";
   import CompactShell from "#lib/components/CompactShell.svelte";
   import { onBackButtonPress } from "@tauri-apps/api/app";
+  import { startAndroid } from "#lib/android.svelte.js";
   import { MAILBOX_TITLES } from "#lib/mailboxes.js";
 
   // `base`: signed in, nothing modal open (global keys). `ready`: base, in the mail views
@@ -148,6 +149,7 @@
 
   onMount(() => {
     const back = platform === "android" ? onBackButtonPress(androidBack) : null;
+    const stopAndroid = startAndroid();
     mail.init();
     api.outboxStatus().then((s) => mail.setOutbox(s));
     mail.refreshScheduled();
@@ -262,6 +264,7 @@
       unregister();
       unlisten.forEach((p) => p.then((f) => f()));
       back?.then((l) => l.unregister());
+      stopAndroid();
     };
   });
 

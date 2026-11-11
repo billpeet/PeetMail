@@ -9,6 +9,7 @@
   import { autostartLabel, isDesktop } from "#lib/platform.js";
   import { mail, type SettingsPage } from "#lib/mail.svelte.js";
   import { updates, updateText } from "#lib/updates.svelte.js";
+  import { android, checkNotifications } from "#lib/android.svelte.js";
   import AccountsSection from "./AccountsSection.svelte";
   import ClientIdForm from "./ClientIdForm.svelte";
   import GoogleClientForm from "./GoogleClientForm.svelte";
@@ -40,6 +41,8 @@
     mail.settingsPage = page as SettingsPage;
   });
 
+  // Android: the permission may have changed in its settings since the last look.
+  onMount(() => void checkNotifications(false));
   onMount(() =>
     keymap.register([
       {
@@ -191,13 +194,23 @@
     {:else if page === "notifications"}
       {@render heading("Notifications & startup", "What PeetMail tells you about, and whether it keeps running in the background.")}
       <SettingsCard>
-        <SettingRow label="New mail notifications" hint="Only while PeetMail isn't the window you're using.">
-          <select data-testid="notify-select" value={mail.boot?.preferences.notify ?? "focused"} onchange={(e) => mail.setPreference("notify", e.currentTarget.value as "off" | "focused" | "all")} class={select}>
+        <SettingRow label="New mail notifications" hint={isDesktop() ? "Only while PeetMail isn't the window you're using." : "Only while PeetMail isn't on screen."}>
+          <select data-testid="notify-select" value={mail.boot?.preferences.notify ?? "focused"} onchange={(e) => {
+            const v = e.currentTarget.value as "off" | "focused" | "all";
+            mail.setPreference("notify", v);
+            // Turning them on is the moment to ask Android for the permission.
+            if (v !== "off") checkNotifications(true);
+          }} class={select}>
             <option value="focused">Focused mail</option>
             <option value="all">All mail</option>
             <option value="off">Off</option>
           </select>
         </SettingRow>
+        {#if !isDesktop() && android.notifications === "denied" && mail.boot?.preferences.notify !== "off"}
+          <SettingRow label="Blocked by Android" hint="Android won't show PeetMail's notifications until you allow them.">
+            <button data-testid="notify-allow" onclick={() => api.openNotificationSettings()} class="rounded-md border border-ink-700 px-3 py-1.5 text-sm text-ink-300 hover:text-ink-100">Open settings</button>
+          </SettingRow>
+        {/if}
       </SettingsCard>
       {#if isDesktop()}
       <SettingsCard>

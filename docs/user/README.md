@@ -3,6 +3,7 @@
 These pages are also in PeetMail itself: press **F1**, or **Ctrl+K** → Help.
 
 - [Getting started](getting-started.md): install, sign in, the first keyboard shortcuts
+- [PeetMail on Android](android.md): installing on a phone, gestures, attachments and notifications
 - [Signatures](signatures.md): your signature for each account, and organisations that add their own
 - [Syncing settings](sync.md): the same settings on every PC you use, through a sync server
 - [Updates](updates.md): how PeetMail updates itself, Stable and Canary

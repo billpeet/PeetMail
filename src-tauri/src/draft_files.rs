@@ -27,6 +27,37 @@ pub fn megabytes(bytes: i64) -> String {
     format!("{:.1} MB", bytes as f64 / 1024.0 / 1024.0)
 }
 
+/// The type for a file name, for files that come without one (shared from another app on
+/// Android). Anything not listed goes as a plain attachment.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn mime_for(name: &str) -> &'static str {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    match ext.as_str() {
+        "pdf" => "application/pdf",
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "heic" => "image/heic",
+        "txt" => "text/plain",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "ics" => "text/calendar",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "zip" => "application/zip",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "mp3" => "audio/mpeg",
+        "m4a" => "audio/mp4",
+        _ => "application/octet-stream",
+    }
+}
+
 /// A file name that's safe to send: no folders, no control characters, never empty.
 fn clean_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or_default();
@@ -99,6 +130,14 @@ pub fn purge_orphans(conn: &Connection) -> Result<usize> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shared_files_get_a_type_from_their_name() {
+        assert_eq!(super::mime_for("Scan.PDF"), "application/pdf");
+        assert_eq!(super::mime_for("photo.jpeg"), "image/jpeg");
+        assert_eq!(super::mime_for("notes"), "application/octet-stream");
+        assert_eq!(super::mime_for("archive.tar.gz"), "application/octet-stream");
+    }
+
     use super::*;
     use crate::db::{self, Db};
     use crate::outbox::{self, Draft, DraftKind, Op};

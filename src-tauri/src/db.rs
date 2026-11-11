@@ -982,6 +982,41 @@ pub fn recent_opens(conn: &Connection, limit: i64) -> Result<Vec<RecentOpen>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// One conversation as a list row (its newest message, outside Deleted Items and Junk), for
+/// opening it from elsewhere: a tapped notification on Android.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn conversation_row(conn: &Connection, account_id: i64, conversation_id: &str) -> Result<Option<ThreadRow>> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT m.id, m.account_id, m.conversation_id, m.subject, m.from_name, m.from_address, m.received_at,
+                m.preview, COUNT(*) OVER (), SUM(1 - m.is_read) OVER (), m.is_flagged, m.has_attachments, m.sort_at
+         FROM messages m JOIN folders f ON f.id = m.folder_id
+         WHERE m.account_id = ?1 AND m.conversation_id = ?2 AND NOT {HIDDEN_ROLES}
+         ORDER BY m.received_at DESC, m.id DESC
+         LIMIT 1"
+    ))?;
+    let row = stmt
+        .query_row(params![account_id, conversation_id], |r| {
+            Ok(ThreadRow {
+                message_id: r.get(0)?,
+                account_id: r.get(1)?,
+                conversation_id: r.get(2)?,
+                subject: r.get(3)?,
+                from_name: r.get(4)?,
+                from_address: r.get(5)?,
+                received_at: r.get(6)?,
+                preview: r.get(7)?,
+                message_count: r.get(8)?,
+                unread_count: r.get(9)?,
+                is_flagged: r.get(10)?,
+                has_attachments: r.get(11)?,
+                reminder: r.get::<_, String>(12)? > r.get::<_, String>(6)?,
+                sort_at: r.get(12)?,
+            })
+        })
+        .optional()?;
+    Ok(row)
+}
+
 // ---------- contacts ----------
 
 #[derive(Debug, Serialize)]
@@ -1628,6 +1663,25 @@ mod tests {
             // newest 2 = m6 (cached, skipped), m5; plus unread m2, m1
             assert_eq!(bodies_to_prefetch(c, 2, 10)?, vec![5, 2, 1]);
             assert_eq!(bodies_to_prefetch(c, 2, 2)?, vec![5, 2]);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_conversation_row_is_its_newest_message_with_counts() {
+        let (db, a, f) = seed();
+        db.with(|c| {
+            upsert_message(c, a, f, &msg("m1", "c1", "2026-10-01T10:00:00Z", false))?;
+            upsert_message(c, a, f, &msg("m2", "c1", "2026-10-02T10:00:00Z", true))?;
+            let row = conversation_row(c, a, "c1")?.expect("found");
+            assert_eq!(row.subject, "subject m2");
+            assert_eq!((row.message_count, row.unread_count), (2, 1));
+            assert!(conversation_row(c, a, "nope")?.is_none());
+            let trash = ensure_local_folder(c, a, "deleteditems", "Deleted Items")?;
+            set_folder(c, 1, trash.id)?;
+            set_folder(c, 2, trash.id)?;
+            assert!(conversation_row(c, a, "c1")?.is_none(), "deleted conversations don't open");
             Ok(())
         })
         .unwrap();

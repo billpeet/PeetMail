@@ -1,4 +1,6 @@
 mod actions;
+#[cfg(target_os = "android")]
+mod android;
 mod auth;
 mod calendar;
 mod commands;
@@ -289,7 +291,7 @@ pub fn run() {
     // install is single-instance: a second launch just shows the running window. A dev
     // build shares the installed app's identifier, so it skips this too (else launching it
     // would just bring up the installed app).
-    #[cfg_attr(mobile, allow(unused_mut))]
+    #[cfg_attr(all(mobile, not(target_os = "android")), allow(unused_mut))]
     let mut builder = tauri::Builder::default();
     #[cfg(desktop)]
     {
@@ -299,6 +301,10 @@ pub fn run() {
         builder = builder
             .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
             .plugin(tauri_plugin_updater::Builder::new().build());
+    }
+    #[cfg(target_os = "android")]
+    {
+        builder = builder.plugin(android::plugin());
     }
     builder
         .plugin(tauri_plugin_notification::init())
@@ -356,6 +362,14 @@ pub fn run() {
                 Err(e) => fatal_startup_error(&format!("This dev build couldn't copy the installed app's database to {}: {e}", dir.display())),
             }
             secure::init(&dir, !is_test);
+            // Android: the key comes out of the Keystore through Kotlin, which can't be asked
+            // from the main thread (sync commands). Fetch it now, once, off that thread.
+            #[cfg(target_os = "android")]
+            std::thread::spawn(|| {
+                if let Err(e) = secure::warm() {
+                    log::warn!("couldn't load the key for saved sign-ins: {e}");
+                }
+            });
             let db = match db::Db::open(&dir.join("peetmail.db")) {
                 Ok(db) => db,
                 Err(e) => fatal_startup_error(&e.to_string()),
@@ -500,6 +514,9 @@ pub fn run() {
             commands::set_autostart,
             commands::quit_app,
             commands::move_to_background,
+            commands::take_pending,
+            commands::notification_permission,
+            commands::open_notification_settings,
             commands::open_external,
             commands::debug_panic,
             commands::set_snippets,

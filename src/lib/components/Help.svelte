@@ -3,10 +3,11 @@
   // offline), the keyboard shortcuts (from the keymap), the changelog, and a way to report
   // a problem.
   import { onMount } from "svelte";
-  import { BookOpen, Cloud, Keyboard, KeyRound, LifeBuoy, MessageSquareWarning, PenLine, RefreshCw, ShieldCheck, Sparkles } from "@lucide/svelte";
+  import { BookOpen, Cloud, Smartphone, Keyboard, KeyRound, LifeBuoy, MessageSquareWarning, PenLine, RefreshCw, ShieldCheck, Sparkles } from "@lucide/svelte";
   import { api } from "#lib/api.js";
   import { DOC_SLUGS, parseDoc, resolveLink, type Doc, type HelpPage } from "#lib/docs.js";
   import { keymap } from "#lib/keys.svelte.js";
+  import { isDesktop } from "#lib/platform.js";
   import { mail } from "#lib/mail.svelte.js";
   import { renderMarkdown } from "#lib/markdown.js";
   import { sectionLabel, whatsNew } from "#lib/whatsnew.svelte.js";
@@ -21,6 +22,8 @@
 
   const pages: SidebarPage[] = [
     { id: "getting-started", label: docs["getting-started"].title, icon: BookOpen },
+    // Only on a phone until the Android app is released (docs/ANDROID.md).
+    ...(isDesktop() ? [] : [{ id: "android", label: docs.android.title, icon: Smartphone }]),
     { id: "shortcuts", label: "Keyboard shortcuts", icon: Keyboard },
     { id: "signatures", label: docs.signatures.title, icon: PenLine },
     { id: "sync", label: docs.sync.title, icon: Cloud },

@@ -20,7 +20,7 @@ PeetMail on Android phones, built from the same Tauri 2 app: the Rust core uncha
 | 1 Rust core on Android | Done |
 | 2 Compact layout (testable on Windows) | Done |
 | 3 Touch: gestures, sheets, back button | Done |
-| 4 Phone-native plumbing (files, share, notifications, secure storage) | Not started |
+| 4 Phone-native plumbing (files, share, notifications, secure storage) | Done (the Microsoft deep link waits on its redirect URI being registered) |
 | 5 Background sync | Not started |
 | 6 Distribution | Not started |
 
@@ -51,7 +51,7 @@ PeetMail on Android phones, built from the same Tauri 2 app: the Rust core uncha
   - Sign-in: the loopback redirect arrives while Chrome is in front, so the token request fails. On mobile, `auth::sign_in` now keeps the code and retries every 2 s for up to 5 minutes, and the browser page says "Go back to PeetMail to finish". The deep-link redirect (Stage 4) is the real fix.
   - The first sync just after sign-in failed once with the same error, then worked on the next cycle.
   - Background sync can only work through WorkManager (Stage 5), which the system lets onto the network; a plain background timer gets nothing.
-- **Saved sign-ins** use the Linux "no keyring" path for now: a random key in a private file in the app's folder. Android Auto Backup and device-to-device transfer are off (`data_extraction_rules.xml`), so the key never travels with the tokens. Keystore wrapping is still Stage 4.
+- **Saved sign-ins** use the Linux "no keyring" path for now: a random key in a private file in the app's folder. Android Auto Backup and device-to-device transfer are off (`data_extraction_rules.xml`), so the key never travels with the tokens. Stage 4 moved the key into the Keystore.
 - **Crash reporting** starts in `setup` on Android (the data folder is only known there); minidumps are off.
 - Notifications need `notification:default` in the capability (the plugin's JS checks permission at startup).
 
@@ -130,16 +130,23 @@ Done. What a finger's movement means lives in `src/lib/gestures.ts` (unit-tested
 
 ## Stage 4: phone-native plumbing
 
-A small Kotlin Tauri plugin (`src-tauri/plugins/android/` or a workspace crate) for what Rust can't do alone:
+One Kotlin class does what Rust can't alone: `gen/android/app/src/main/java/com/peetsoftware/peetmail/PeetPlugin.kt`, registered as the `peetmail` Tauri plugin by `src-tauri/src/android.rs`. It lives in the app module, not a plugin crate, since nothing else uses it. Rust calls it with `run_mobile_plugin`, which blocks until Kotlin answers on Android's main thread, so it's never called *from* the main thread (sync commands run there).
 
-- **Keystore** wrap/unwrap for `secure.rs` (see Decisions). Lost key (factory reset, backup restored to another phone) means signing in again, like a DPAPI blob on a new Windows profile. Exclude the database from Android Auto Backup.
-- **Sign-in via deep link** for Microsoft: register `com.peetsoftware.peetmail://auth` (or an App Link) on the built-in Entra app, open the authorize URL in a Custom Tab, receive the code through `tauri-plugin-deep-link`. Loopback stays for desktop and for your-own-app accounts.
-- **Attachments**: open through an intent with a `FileProvider` URI; save through the system "Save to" picker (MediaStore/SAF) instead of Downloads.
-- **Composer attachments**: file picker (`tauri-plugin-dialog`), since drag and drop doesn't exist here.
-- **Share into PeetMail**: "Share → PeetMail" with files or a link opens the composer with them attached.
-- **Notifications**: `tauri-plugin-notification` works on Android; ask for `POST_NOTIFICATIONS` the first time notifications are on, not at launch. Tapping one opens the conversation. Snooze and send-later reminders use scheduled notifications, so they fire with the app closed.
-- **Diagnostics export and Report a problem**: the share sheet.
-- `docs/user/`: an Android page (getting started, gestures, what's desktop only), with the unit test that checks pages and links.
+What other apps hand PeetMail (shares, the sign-in redirect, notification taps) arrives as intents. PeetPlugin keeps them in `pending` and fires `peetmail-pending` on the page. The page calls `take_pending` once startup has loaded the accounts, and again on each event (`src/lib/android.svelte.ts`).
+
+- **Keystore**: the 32-byte key for saved sign-ins is random, stored as `token.key.wrapped`, and encrypted by an AES-GCM key that never leaves the Android Keystore (`secure.rs`, `wrapped`). The plain `token.key` from Stages 0–3 is moved into it on first run (checked on the emulator). A lost Keystore key or a damaged file means a new key and signing in again; any other Keystore error is an error, so a hiccup never throws away sign-ins that still decrypt. The key is fetched once at startup on a background thread.
+- **Sign-in via deep link** (Microsoft, built-in app only): the redirect is `com.peetsoftware.peetmail://auth`. The authorize page opens in a Custom Tab, and the redirect brings PeetMail back to the front (and closes the tab) before the token exchange, so the network is allowed. Your own app and Gmail keep the loopback redirect with the offline retry. **Not yet tried end to end:** the redirect URI has to be added to the built-in Entra registration first (Authentication → Mobile and desktop applications → `com.peetsoftware.peetmail://auth`). Until it is, Microsoft sign-in on Android shows Entra's redirect-mismatch error.
+- **Attachments**: a tap opens one with `ACTION_VIEW` on a `FileProvider` URI from the cache; Android asks which app if there are several, and says so if there's none. The button beside it saves to Downloads through MediaStore (no permission needed). On a phone the chip has both, since there's no double-click.
+- **Composer attachments**: the paperclip's `<input type=file>` already opens the system picker through wry. Android's WebView can't pass a raw request body over IPC, so Tauri sends the bytes as a JSON array of numbers; `add_draft_file` takes either.
+- **Share → PeetMail**: `SEND` / `SEND_MULTIPLE` with any type. Files are copied into the cache while the sharing app's permission lasts, then added as draft attachments in Rust, and the composer opens with them, the subject and the text. Files PeetMail isn't allowed to read show as "Couldn't attach".
+- **Notifications**: the permission is asked once, when an account is signed in and notifications are on, and again when they're turned on in Settings. Settings shows "Blocked by Android" with a button to its notification settings. Each single-message notification carries its account and conversation in `extra`, and a tap opens it, warm or from a cold start (checked by sending the same intent the notification plugin builds).
+- **Diagnostics**: Export writes the zip to the cache and opens the share sheet.
+- `docs/user/android.md`, shown in Help on Android only until the app is released.
+
+Not done:
+- Snooze and send-later reminders as scheduled notifications that fire with the app closed. Reminders still come from the sync loop; Stage 5's worker is where they belong.
+- Gmail sign-in on Android is still untried.
+- The status bar text is dark over the app's dark chrome on some screens (the composer, Settings). It needs `WindowInsetsController` light/dark icons following the theme.
 
 ## Stage 5: background sync (required for v1)
 

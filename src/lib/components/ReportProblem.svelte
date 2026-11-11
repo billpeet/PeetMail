@@ -10,6 +10,7 @@
   import { api, type FeedbackOptions } from "#lib/api.js";
   import { mail } from "#lib/mail.svelte.js";
   import { updates } from "#lib/updates.svelte.js";
+  import { isDesktop } from "#lib/platform.js";
   import SettingRow from "./SettingRow.svelte";
   import SettingsCard from "./SettingsCard.svelte";
 
@@ -60,7 +61,8 @@
     exported = null;
     try {
       const path = await api.exportDiagnostics();
-      exported = { kind: "saved", text: `Saved to ${path}` };
+      // Android hands the zip to the share sheet instead of saving it.
+      exported = { kind: "saved", text: isDesktop() ? `Saved to ${path}` : `Shared ${path.split("/").pop()}` };
     } catch (err) {
       exported = { kind: "error", text: String(err) };
     } finally {
@@ -116,7 +118,7 @@
   {/if}
 
   <SettingsCard title="Diagnostics" description="A zip of versions, settings, the database's health and recent logs, with addresses, names and tokens removed. No mail, subjects or contacts.">
-    <SettingRow label="Export diagnostics" hint="Saves the zip to Downloads, to attach to an email or a GitHub issue.">
+    <SettingRow label="Export diagnostics" hint={isDesktop() ? "Saves the zip to Downloads, to attach to an email or a GitHub issue." : "Makes the zip and opens the share sheet, to send it by email or attach it to a GitHub issue."}>
       <button data-testid="diagnostics-export" class={button} disabled={exporting} onclick={exportDiagnostics}>{exporting ? "Exporting…" : "Export"}</button>
     </SettingRow>
     {#if exported}

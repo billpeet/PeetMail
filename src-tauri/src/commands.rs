@@ -582,6 +582,108 @@ pub fn move_to_background(app: AppHandle) -> Result<()> {
     Ok(())
 }
 
+/// What another app handed PeetMail (Android), ready for the page: shared files already
+/// added as draft attachments, and a tapped notification's conversation.
+#[derive(Serialize, Default)]
+pub struct Pending {
+    shared: Option<Shared>,
+    open: Option<db::ThreadRow>,
+}
+
+#[derive(Serialize, Default)]
+pub struct Shared {
+    subject: Option<String>,
+    text: Option<String>,
+    files: Vec<draft_files::DraftFile>,
+    /// Files that couldn't be attached, with why.
+    failed: Vec<String>,
+}
+
+/// Collects what arrived since the last call. The page calls it at startup and on each
+/// `peetmail-pending` event (PeetPlugin.kt). A sign-in redirect goes to the sign-in waiting
+/// for it instead.
+#[tauri::command]
+pub async fn take_pending(state: State<'_, AppState>) -> Result<Pending> {
+    #[cfg(target_os = "android")]
+    {
+        let got = crate::android::take_pending().await?;
+        if let Some(url) = got.redirect
+            && !auth::deliver_app_redirect(url)
+        {
+            log::info!("a sign-in redirect arrived with no sign-in waiting for it");
+        }
+        let shared = got.shared.map(|s| {
+            let dir = s.files_dir().map(std::path::Path::to_path_buf);
+            let mut out = Shared { subject: s.subject, text: s.text, failed: s.failed, ..Default::default() };
+            for f in s.files {
+                let added = std::fs::read(&f.path)
+                    .map_err(AppError::from)
+                    .and_then(|bytes| state.db.with(|c| draft_files::add(c, &f.name, draft_files::mime_for(&f.name), &bytes)));
+                let _ = std::fs::remove_file(&f.path);
+                match added {
+                    Ok(file) => out.files.push(file),
+                    Err(e) => out.failed.push(format!("{}: {e}", f.name)),
+                }
+            }
+            if let Some(dir) = dir {
+                let _ = std::fs::remove_dir(dir);
+            }
+            out
+        });
+        let open = match got.open {
+            Some(o) => state.db.with(|c| db::conversation_row(c, o.account_id, &o.conversation_id))?,
+            None => None,
+        };
+        Ok(Pending { shared, open })
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = state;
+        Ok(Pending::default())
+    }
+}
+
+/// Whether PeetMail may show notifications: "granted", "denied" or "prompt". `ask` shows
+/// Android's permission prompt when it hasn't been answered. Desktop never needs asking.
+#[tauri::command]
+pub async fn notification_permission(app: AppHandle, ask: bool) -> Result<String> {
+    #[cfg(mobile)]
+    {
+        use tauri_plugin_notification::NotificationExt;
+        let state = tauri::async_runtime::spawn_blocking(move || {
+            let n = app.notification();
+            let now = n.permission_state()?;
+            if ask && !matches!(now, tauri::plugin::PermissionState::Granted | tauri::plugin::PermissionState::Denied) {
+                return n.request_permission();
+            }
+            Ok(now)
+        })
+        .await
+        .map_err(|e| AppError::Other(e.to_string()))?
+        .map_err(|e: tauri_plugin_notification::Error| AppError::Other(e.to_string()))?;
+        Ok(match state {
+            tauri::plugin::PermissionState::Granted => "granted",
+            tauri::plugin::PermissionState::Denied => "denied",
+            _ => "prompt",
+        }
+        .into())
+    }
+    #[cfg(desktop)]
+    {
+        let _ = (app, ask);
+        Ok("granted".into())
+    }
+}
+
+/// Android's notification settings for PeetMail, to allow them after saying no.
+#[tauri::command]
+pub async fn open_notification_settings() -> Result<()> {
+    #[cfg(target_os = "android")]
+    return crate::android::open_notification_settings().await;
+    #[cfg(not(target_os = "android"))]
+    Ok(())
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Privacy {
@@ -654,13 +756,18 @@ pub fn feedback_options() -> crate::support::FeedbackOptions {
     crate::support::feedback_options()
 }
 
-/// Saves the diagnostics zip to Downloads and shows it. Returns where it went.
+/// Saves the diagnostics zip to Downloads and shows it (Android: opens the share sheet with
+/// it). Returns where it went.
 #[tauri::command]
 pub async fn export_diagnostics(app: AppHandle) -> Result<String> {
-    not_on_phones_yet("Saving diagnostics")?;
     let path = tauri::async_runtime::spawn_blocking(move || crate::support::export_diagnostics(&app))
         .await
         .map_err(|e| AppError::Other(e.to_string()))??;
+    #[cfg(target_os = "android")]
+    {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        crate::android::share_file(&path, &name, "Send PeetMail's diagnostics").await?;
+    }
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -902,15 +1009,26 @@ pub fn send_message(app: AppHandle, state: State<'_, AppState>, input: SendInput
 /// and `x-file-type` headers.
 #[tauri::command]
 pub fn add_draft_file(state: State<'_, AppState>, request: tauri::ipc::Request<'_>) -> Result<draft_files::DraftFile> {
-    let tauri::ipc::InvokeBody::Raw(data) = request.body() else {
-        return Err(AppError::Other("expected the file's bytes".into()));
-    };
+    let data = body_bytes(request.body()).ok_or_else(|| AppError::Other("expected the file's bytes".into()))?;
+    let data = data.as_ref();
     let header = |n: &str| request.headers().get(n).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
     let name = url::form_urlencoded::parse(format!("n={}", header("x-file-name")).as_bytes())
         .next()
         .map(|(_, v)| v.into_owned())
         .unwrap_or_default();
     state.db.with(|c| draft_files::add(c, &name, &header("x-file-type"), data))
+}
+
+/// A request's bytes. Android's WebView can't hand a raw body over, so Tauri's fallback sends
+/// them as a JSON array of numbers instead.
+fn body_bytes(body: &tauri::ipc::InvokeBody) -> Option<std::borrow::Cow<'_, [u8]>> {
+    match body {
+        tauri::ipc::InvokeBody::Raw(data) => Some(std::borrow::Cow::Borrowed(data)),
+        tauri::ipc::InvokeBody::Json(serde_json::Value::Array(items)) => {
+            items.iter().map(|v| v.as_u64().and_then(|n| u8::try_from(n).ok())).collect::<Option<Vec<u8>>>().map(std::borrow::Cow::Owned)
+        }
+        _ => None,
+    }
 }
 
 /// Saves the composer's message as a draft (as it's typed, and when it's closed). Returns
@@ -1382,17 +1500,8 @@ pub async fn list_attachments(state: State<'_, AppState>, message_id: i64) -> Re
     mail::list_attachments(&state, message_id).await
 }
 
-/// Android has no Downloads folder an app can write to directly, and other apps only open
-/// files shared through a content URI; both wait for docs/ANDROID.md Stage 4. Until then
-/// these say so instead of saving where nobody can find the file.
-fn not_on_phones_yet(what: &str) -> Result<()> {
-    if cfg!(mobile) {
-        return Err(AppError::Other(format!("{what} isn't available on Android yet.")));
-    }
-    Ok(())
-}
-
-/// Saves an attachment to Downloads and reveals it in Explorer. Returns the saved path.
+/// Saves an attachment to Downloads and reveals it in Explorer. Returns the saved path
+/// (Android: goes into Downloads through MediaStore, and returns the name it got there).
 #[tauri::command]
 pub async fn download_attachment(
     app: AppHandle,
@@ -1401,7 +1510,16 @@ pub async fn download_attachment(
     attachment_id: String,
     name: String,
 ) -> Result<String> {
-    not_on_phones_yet("Saving attachments")?;
+    // Android: apps can't write to Downloads directly; the file goes through the cache.
+    #[cfg(target_os = "android")]
+    if crate::testenv::get("PEETMAIL_DOWNLOAD_DIR").is_none() {
+        let dir = attachments_dir(&app)?.join("saving");
+        let path = mail::download_attachment(&state, message_id, &attachment_id, &name, &dir).await?;
+        let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(name);
+        let saved = crate::android::save_to_downloads(&path, &file).await;
+        let _ = std::fs::remove_file(&path);
+        return saved;
+    }
     let dir = match crate::testenv::get("PEETMAIL_DOWNLOAD_DIR") {
         Some(d) => std::path::PathBuf::from(d),
         None => tauri::Manager::path(&app).download_dir().map_err(|e| AppError::Other(e.to_string()))?,
@@ -1440,7 +1558,6 @@ pub async fn open_attachment(
     attachment_id: String,
     name: String,
 ) -> Result<()> {
-    not_on_phones_yet("Opening attachments")?;
     let dir = attachments_dir(&app)?;
     let path = mail::attachment_for_opening(&state, message_id, &attachment_id, &name, &dir).await?;
     if let Some(log) = crate::testenv::get("PEETMAIL_OPEN_LOG") {
@@ -1449,11 +1566,23 @@ pub async fn open_attachment(
         writeln!(f, "{}", path.display())?;
         return Ok(());
     }
+    #[cfg(target_os = "android")]
+    return crate::android::open_file(&path, &name).await;
+    #[cfg(not(target_os = "android"))]
     app.opener().open_path(path.to_string_lossy(), None::<&str>).map_err(|e| AppError::Other(format!("couldn't open {name}: {e}")))
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_bytes_arrive_raw_or_as_androids_json_array() {
+        use tauri::ipc::InvokeBody;
+        assert_eq!(super::body_bytes(&InvokeBody::Raw(vec![1, 2, 255])).as_deref(), Some(&[1u8, 2, 255][..]));
+        assert_eq!(super::body_bytes(&InvokeBody::Json(serde_json::json!([1, 2, 255]))).as_deref(), Some(&[1u8, 2, 255][..]));
+        assert_eq!(super::body_bytes(&InvokeBody::Json(serde_json::json!([1, 256]))), None, "not bytes");
+        assert_eq!(super::body_bytes(&InvokeBody::Json(serde_json::json!({ "a": 1 }))), None);
+    }
+
     #[test]
     fn signatures_are_sanitized_keyed_by_lowercase_address_and_empty_ones_dropped() {
         use super::{clean_signatures, Signature};

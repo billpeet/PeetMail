@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- The WebView's camera capture (generated RustWebChromeClient.kt). -->
   <external-path name="my_images" path="." />
+  <!-- Attachments being opened and the diagnostics zip being shared (PeetPlugin.kt). -->
   <cache-path name="my_cache_images" path="." />
 </paths>

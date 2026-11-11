@@ -79,6 +79,12 @@ pub fn protect(data: &[u8]) -> Result<Vec<u8>> {
     sealed::seal(&linux::key(true)?, data)
 }
 
+/// Loads the key into the cache (Android, at startup: see lib.rs).
+#[cfg(target_os = "android")]
+pub fn warm() -> Result<()> {
+    linux::key(true).map(|_| ())
+}
+
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn unprotect(data: &[u8]) -> Result<Vec<u8>> {
     sealed::open(&linux::key(false)?, data)
@@ -146,11 +152,12 @@ mod sealed {
     }
 }
 
-/// Also Android's, which has no keyring: the key lives in a private file in the app's own
-/// folder, which Android's app sandbox keeps from every other app (and backups are off,
-/// AndroidManifest.xml). TODO(android stage 4): wrap it with an Android Keystore key.
+/// Also Android's, where `key()` goes to `wrapped::load_or_create` with the Android Keystore
+/// instead of a keyring.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod linux {
+    // Android uses `key()` and the cache, with its own store (`wrapped`), not the keyring code.
+    #![cfg_attr(target_os = "android", allow(dead_code))]
     use super::{AppError, Result};
     #[cfg(target_os = "linux")]
     use std::collections::HashMap;
@@ -195,7 +202,7 @@ mod linux {
         #[cfg(target_os = "android")]
         let found = {
             let _ = keyring;
-            load_or_create(dir, &NoKeyring)
+            super::wrapped::load_or_create(dir, &super::wrapped::AndroidKeystore)
         };
         match found {
             Ok(k) => {
@@ -356,6 +363,181 @@ mod linux {
                 .map(|_| ())
                 .map_err(refusal)
         }
+    }
+}
+
+/// Android's key for saved sign-ins: random, kept in `token.key.wrapped` encrypted by a key
+/// that never leaves the Android Keystore (`android.rs`, PeetPlugin.kt). Written for every
+/// platform so its tests run everywhere; only Android calls it.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod wrapped {
+    use super::{AppError, Result};
+    use std::path::Path;
+
+    pub const WRAPPED_FILE: &str = "token.key.wrapped";
+    /// Where builds before the Keystore kept the key, unwrapped. Moved into the Keystore once.
+    pub const PLAIN_FILE: &str = "token.key";
+
+    pub enum WrapError {
+        /// The Keystore key is gone (it doesn't survive a restore onto another phone).
+        Gone,
+        Failed(String),
+    }
+
+    pub trait Wrapper {
+        fn wrap(&self, data: &[u8]) -> std::result::Result<Vec<u8>, WrapError>;
+        fn unwrap(&self, blob: &[u8]) -> std::result::Result<Vec<u8>, WrapError>;
+    }
+
+    fn failed(e: WrapError) -> AppError {
+        match e {
+            WrapError::Gone => AppError::Other("the Android Keystore key for saved sign-ins is gone".into()),
+            WrapError::Failed(why) => AppError::Other(format!("The Android Keystore didn't answer ({why}). Sync again in a moment.")),
+        }
+    }
+
+    fn new_key() -> Result<[u8; 32]> {
+        let mut k = [0u8; 32];
+        getrandom::fill(&mut k).map_err(|e| AppError::Other(format!("OS RNG unavailable: {e}")))?;
+        Ok(k)
+    }
+
+    fn store(dir: &Path, key: &[u8; 32], keystore: &dyn Wrapper) -> Result<()> {
+        let blob = keystore.wrap(key).map_err(failed)?;
+        let tmp = dir.join(format!("{WRAPPED_FILE}.tmp"));
+        std::fs::write(&tmp, blob)?;
+        std::fs::rename(&tmp, dir.join(WRAPPED_FILE))?;
+        Ok(())
+    }
+
+    /// The key, unwrapped. A key file from before the Keystore is wrapped and then deleted. A
+    /// lost Keystore key or a damaged file loses the sign-ins either way, so it's set aside
+    /// and a new key made (the user signs in again); any other Keystore failure is an error,
+    /// so a passing hiccup never throws away sign-ins that still decrypt.
+    pub fn load_or_create(dir: &Path, keystore: &dyn Wrapper) -> Result<[u8; 32]> {
+        let file = dir.join(WRAPPED_FILE);
+        if file.exists() {
+            let blob = std::fs::read(&file)?;
+            match keystore.unwrap(&blob) {
+                Ok(bytes) if bytes.len() == 32 => return Ok(bytes.try_into().expect("checked length")),
+                Ok(_) | Err(WrapError::Gone) => {
+                    log::warn!("the key for saved sign-ins can't be recovered; setting it aside and making a new one");
+                    std::fs::rename(&file, dir.join(format!("{WRAPPED_FILE}.lost")))?;
+                }
+                Err(e) => return Err(failed(e)),
+            }
+        }
+        let plain = dir.join(PLAIN_FILE);
+        let key = match std::fs::read(&plain).ok().and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok()) {
+            Some(k) => k,
+            None => new_key()?,
+        };
+        store(dir, &key, keystore)?;
+        if plain.exists() {
+            std::fs::remove_file(&plain)?;
+            log::info!("moved the key for saved sign-ins into the Android Keystore");
+        }
+        Ok(key)
+    }
+
+    #[cfg(target_os = "android")]
+    pub struct AndroidKeystore;
+
+    #[cfg(target_os = "android")]
+    impl Wrapper for AndroidKeystore {
+        fn wrap(&self, data: &[u8]) -> std::result::Result<Vec<u8>, WrapError> {
+            crate::android::wrap(data).map_err(|r| WrapError::Failed(r.message))
+        }
+        fn unwrap(&self, blob: &[u8]) -> std::result::Result<Vec<u8>, WrapError> {
+            crate::android::unwrap(blob).map_err(|r| if r.code.as_deref() == Some("missing") { WrapError::Gone } else { WrapError::Failed(r.message) })
+        }
+    }
+}
+
+#[cfg(test)]
+mod wrapped_tests {
+    use super::wrapped::{load_or_create, WrapError, Wrapper, PLAIN_FILE, WRAPPED_FILE};
+    use std::cell::Cell;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("peetmail-wrapped-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// XOR with a byte stands in for the Keystore. `state` 0: works. 1: its key is gone, so
+    /// nothing old unwraps (and wrapping makes a new key). 2: fails.
+    struct FakeKeystore {
+        state: Cell<u8>,
+    }
+    impl FakeKeystore {
+        fn new() -> Self {
+            Self { state: Cell::new(0) }
+        }
+        fn check(&self) -> Result<(), WrapError> {
+            match self.state.get() {
+                1 => Err(WrapError::Gone),
+                2 => Err(WrapError::Failed("busy".into())),
+                _ => Ok(()),
+            }
+        }
+    }
+    impl Wrapper for FakeKeystore {
+        fn wrap(&self, data: &[u8]) -> Result<Vec<u8>, WrapError> {
+            if self.state.get() == 2 {
+                return Err(WrapError::Failed("busy".into()));
+            }
+            self.state.set(0);
+            Ok(data.iter().map(|b| b ^ 0x5a).collect())
+        }
+        fn unwrap(&self, blob: &[u8]) -> Result<Vec<u8>, WrapError> {
+            self.check()?;
+            Ok(blob.iter().map(|b| b ^ 0x5a).collect())
+        }
+    }
+
+    #[test]
+    fn the_key_is_kept_wrapped_and_comes_back_the_same() {
+        let dir = temp_dir("same");
+        let ks = FakeKeystore::new();
+        let k = load_or_create(&dir, &ks).unwrap();
+        let on_disk = std::fs::read(dir.join(WRAPPED_FILE)).unwrap();
+        assert_ne!(on_disk, k, "the file holds the wrapped key, not the key");
+        assert_eq!(load_or_create(&dir, &ks).unwrap(), k);
+    }
+
+    #[test]
+    fn an_old_plain_key_file_moves_into_the_keystore() {
+        let dir = temp_dir("migrate");
+        std::fs::write(dir.join(PLAIN_FILE), [7u8; 32]).unwrap();
+        let ks = FakeKeystore::new();
+        assert_eq!(load_or_create(&dir, &ks).unwrap(), [7u8; 32]);
+        assert!(!dir.join(PLAIN_FILE).exists());
+        assert_eq!(load_or_create(&dir, &ks).unwrap(), [7u8; 32]);
+    }
+
+    #[test]
+    fn a_keystore_that_fails_is_an_error_and_keeps_the_old_key() {
+        let dir = temp_dir("busy");
+        let ks = FakeKeystore::new();
+        let k = load_or_create(&dir, &ks).unwrap();
+        ks.state.set(2);
+        assert!(load_or_create(&dir, &ks).is_err());
+        ks.state.set(0);
+        assert_eq!(load_or_create(&dir, &ks).unwrap(), k);
+    }
+
+    #[test]
+    fn a_lost_keystore_key_means_a_new_key_and_signing_in_again() {
+        let dir = temp_dir("lost");
+        let ks = FakeKeystore::new();
+        let k = load_or_create(&dir, &ks).unwrap();
+        ks.state.set(1);
+        let k2 = load_or_create(&dir, &ks).unwrap();
+        assert_ne!(k, k2);
+        assert!(dir.join(format!("{WRAPPED_FILE}.lost")).exists());
+        assert_eq!(load_or_create(&dir, &ks).unwrap(), k2);
     }
 }
 

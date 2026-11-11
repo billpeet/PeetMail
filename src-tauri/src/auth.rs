@@ -72,7 +72,14 @@ pub struct OAuthConfig {
     redirect_host: &'static str,
     /// Entra wants the scopes repeated on token requests; Google doesn't.
     scope_on_token: bool,
+    /// Redirect to `APP_REDIRECT_URI` (Android, docs/ANDROID.md Stage 4) instead of loopback.
+    app_redirect: bool,
 }
+
+/// PeetMail's own redirect on Android: the sign-in page hands the code straight back to the
+/// app (AndroidManifest.xml, PeetPlugin.kt), which brings it to the front. Registered on the
+/// built-in Entra app as a "Mobile and desktop applications" redirect URI.
+pub const APP_REDIRECT_URI: &str = "com.peetsoftware.peetmail://auth";
 
 impl OAuthConfig {
     pub fn microsoft(client_id: &str) -> Self {
@@ -86,6 +93,7 @@ impl OAuthConfig {
             extra: &[("response_mode", "query"), ("prompt", "select_account")],
             redirect_host: "localhost",
             scope_on_token: true,
+            app_redirect: false,
         }
     }
 
@@ -102,6 +110,7 @@ impl OAuthConfig {
             extra: &[("access_type", "offline"), ("prompt", "consent select_account")],
             redirect_host: "127.0.0.1",
             scope_on_token: false,
+            app_redirect: false,
         }
     }
 }
@@ -119,6 +128,11 @@ impl OAuthConfig {
 
     pub fn with_login_hint(mut self, email: &str) -> Self {
         self.login_hint = Some(email.into());
+        self
+    }
+
+    pub fn with_app_redirect(mut self) -> Self {
+        self.app_redirect = true;
         self
     }
 }
@@ -186,10 +200,12 @@ pub async fn sign_in(
     cfg: &OAuthConfig,
     mut cancel: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(TokenSet, Option<String>)> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let port = listener.local_addr()?.port();
-    // Both providers allow any port on a registered loopback redirect for desktop apps.
-    let redirect_uri = format!("http://{}:{port}", cfg.redirect_host);
+    let listener = if cfg.app_redirect { None } else { Some(TcpListener::bind("127.0.0.1:0").await?) };
+    let redirect_uri = match &listener {
+        // Both providers allow any port on a registered loopback redirect for desktop apps.
+        Some(l) => format!("http://{}:{}", cfg.redirect_host, l.local_addr()?.port()),
+        None => APP_REDIRECT_URI.to_string(),
+    };
     let verifier = random_b64(64);
     let state = random_b64(16);
 
@@ -218,16 +234,33 @@ pub async fn sign_in(
                 log::error!("auth autofollow failed: {e}");
             }
         });
-    } else {
+    }
+    let redirected = match &listener {
+        Some(_) => None,
+        None => Some(expect_app_redirect()),
+    };
+    if !crate::testenv::flag("PEETMAIL_AUTH_AUTOFOLLOW") {
+        // The app redirect opens in a Custom Tab, which closes itself when PeetMail comes back.
+        let with = if redirected.is_some() { Some("inAppBrowser") } else { None };
         app.opener()
-            .open_url(auth_url.as_str(), None::<&str>)
+            .open_url(auth_url.as_str(), with)
             .map_err(|e| AppError::Auth(format!("could not open browser: {e}")))?;
     }
 
+    let waiting = async {
+        match (listener, redirected) {
+            (Some(listener), _) => wait_for_code(listener, &state).await,
+            (None, Some(rx)) => {
+                let url = rx.await.map_err(|_| AppError::Auth("cancelled".into()))?;
+                code_from(&app_redirect_params(&url), &state)
+            }
+            (None, None) => unreachable!("one or the other is set up above"),
+        }
+    };
     // A wrong client ID shows an error page in the browser and never redirects back,
     // so cancellation is the only way out short of the timeout.
     let code = tokio::select! {
-        r = tokio::time::timeout(SIGN_IN_TIMEOUT, wait_for_code(listener, &state)) => {
+        r = tokio::time::timeout(SIGN_IN_TIMEOUT, waiting) => {
             r.map_err(|_| AppError::Auth("timed out waiting for the browser".into()))??
         }
         _ = &mut cancel => return Err(AppError::Auth("cancelled".into())),
@@ -243,9 +276,9 @@ pub async fn sign_in(
         ];
         token_request(http, cfg, &cfg.scopes, &mut form, None).await
     };
-    // Android cuts a backgrounded app off the network, and the redirect arrives while the
-    // browser is in front: keep the code and try again until the user switches back.
-    // TODO(android stage 4): the deep-link redirect brings PeetMail to the front first.
+    // Android cuts a backgrounded app off the network, and a loopback redirect arrives while
+    // the browser is in front: keep the code and try again until the user switches back. (The
+    // app redirect brings PeetMail to the front first; the retry covers a slow switch.)
     if cfg!(mobile) {
         retry_while_offline(exchange, is_offline, OFFLINE_RETRY_EVERY, OFFLINE_RETRY_FOR, cancel).await
     } else {
@@ -358,13 +391,7 @@ async fn wait_for_code(listener: TcpListener, expected_state: &str) -> Result<St
             continue;
         }
 
-        let outcome = if let Some(err) = params.get("error") {
-            Err(AppError::Auth(format!("{err}: {}", params.get("error_description").cloned().unwrap_or_default())))
-        } else if params.get("state").map(String::as_str) != Some(expected_state) {
-            Err(AppError::Auth("state mismatch".into()))
-        } else {
-            Ok(params["code"].clone())
-        };
+        let outcome = code_from(&params, expected_state);
 
         let message = match &outcome {
             Ok(_) if cfg!(mobile) => "Signed in. Go back to PeetMail to finish.",
@@ -385,6 +412,42 @@ async fn wait_for_code(listener: TcpListener, expected_state: &str) -> Result<St
     }
 }
 
+/// The code in a redirect's parameters, or why there isn't one.
+fn code_from(params: &HashMap<String, String>, expected_state: &str) -> Result<String> {
+    if let Some(err) = params.get("error") {
+        Err(AppError::Auth(format!("{err}: {}", params.get("error_description").cloned().unwrap_or_default())))
+    } else if params.get("state").map(String::as_str) != Some(expected_state) {
+        Err(AppError::Auth("state mismatch".into()))
+    } else {
+        params.get("code").cloned().ok_or_else(|| AppError::Auth("the sign-in page sent no code".into()))
+    }
+}
+
+/// The sign-in waiting for the app redirect (one at a time: a new sign-in replaces it).
+static APP_REDIRECT: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>> = std::sync::Mutex::new(None);
+
+fn expect_app_redirect() -> tokio::sync::oneshot::Receiver<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    *APP_REDIRECT.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
+    rx
+}
+
+/// Hands an app redirect (from Android) to the sign-in waiting for it. False if none is.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn deliver_app_redirect(url: String) -> bool {
+    if !url.starts_with(APP_REDIRECT_URI) {
+        return false;
+    }
+    match APP_REDIRECT.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        Some(tx) => tx.send(url).is_ok(),
+        None => false,
+    }
+}
+
+fn app_redirect_params(url: &str) -> HashMap<String, String> {
+    Url::parse(url).map(|u| u.query_pairs().into_owned().collect()).unwrap_or_default()
+}
+
 fn parse_redirect(request: &str) -> HashMap<String, String> {
     let path = request.lines().next().and_then(|l| l.split_whitespace().nth(1)).unwrap_or("/");
     Url::parse(&format!("http://localhost{path}"))
@@ -395,6 +458,19 @@ fn parse_redirect(request: &str) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_app_redirect_reaches_the_waiting_sign_in_with_its_code() {
+        assert!(!deliver_app_redirect(format!("{APP_REDIRECT_URI}?code=c&state=s")), "nobody waiting");
+        let rx = expect_app_redirect();
+        assert!(!deliver_app_redirect("https://evil.example/?code=x&state=s".into()), "only PeetMail's own redirect");
+        assert!(deliver_app_redirect(format!("{APP_REDIRECT_URI}?code=abc&state=s1")));
+        let url = rx.await.unwrap();
+        assert_eq!(code_from(&app_redirect_params(&url), "s1").unwrap(), "abc");
+        assert!(code_from(&app_redirect_params(&url), "other").is_err(), "state must match");
+        let denied = app_redirect_params(&format!("{APP_REDIRECT_URI}?error=access_denied&error_description=no&state=s1"));
+        assert!(code_from(&denied, "s1").unwrap_err().to_string().contains("access_denied"));
+    }
 
     #[test]
     fn scopes_merge_without_repeats_and_match_short_or_full_names() {

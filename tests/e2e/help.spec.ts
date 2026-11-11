@@ -12,7 +12,9 @@ test("F1 opens Help at Getting started, with every doc page from docs/user", asy
   const help = page.getByTestId("help");
   await expect(help).toHaveAttribute("data-page", "getting-started");
   await expect(page.getByTestId("help-content")).toContainText("Install");
-  for (const slug of DOC_SLUGS) {
+  // The Android page shows only on a phone until the Android app is released.
+  await expect(page.getByTestId("help-nav-android")).toHaveCount(0);
+  for (const slug of DOC_SLUGS.filter((s) => s !== "android")) {
     await expect(page.getByTestId(`help-nav-${slug}`)).toHaveText(title(slug));
     await page.getByTestId(`help-nav-${slug}`).click();
     await expect(page.getByTestId("help-content").locator("h2").first()).toHaveText(title(slug));

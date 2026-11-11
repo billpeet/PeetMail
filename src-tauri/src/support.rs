@@ -101,13 +101,15 @@ pub fn export_diagnostics(app: &AppHandle) -> Result<PathBuf> {
     let bytes = diagnostics_zip(app)?;
     let dir = match testenv::get("PEETMAIL_DOWNLOAD_DIR") {
         Some(d) => PathBuf::from(d),
+        // Android: the zip goes to the share sheet from the cache (commands::export_diagnostics).
+        None if cfg!(target_os = "android") => app.path().app_cache_dir().map_err(|e| AppError::Other(e.to_string()))?.join("diagnostics"),
         None => app.path().download_dir().map_err(|e| AppError::Other(e.to_string()))?,
     };
     std::fs::create_dir_all(&dir)?;
     let name = format!("PeetMail-diagnostics-{}-{}.zip", env!("CARGO_PKG_VERSION"), chrono::Local::now().format("%Y%m%d-%H%M%S"));
     let path = dir.join(name);
     std::fs::write(&path, bytes)?;
-    if testenv::get("PEETMAIL_DOWNLOAD_DIR").is_none() {
+    if testenv::get("PEETMAIL_DOWNLOAD_DIR").is_none() && cfg!(desktop) {
         use tauri_plugin_opener::OpenerExt;
         let _ = app.opener().reveal_item_in_dir(&path);
     }

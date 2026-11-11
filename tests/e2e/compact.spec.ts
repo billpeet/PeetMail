@@ -2,6 +2,8 @@
 // one screen at a time, a bottom bar, the mailboxes in a drawer, dialogs as full pages.
 // Escape stands in for Android's back button, which sends it (+page.svelte, androidBack).
 
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { Page } from "@playwright/test";
 import { test, expect, row, folderConversations, snap } from "./fixtures";
 
@@ -282,3 +284,17 @@ test("flicking across a conversation moves to the next and back, over the mail i
   await expect(reader).toHaveAttribute("data-conversation-id", "conv-plain");
 });
 
+
+test("a tap opens an attachment, and the button beside it saves it to Downloads", async ({ inbox: page, app }) => {
+  await row(page, "conv-attach").click();
+  await expect(page.getByTestId("reader")).toHaveAttribute("data-conversation-id", "conv-attach");
+  await page.getByTestId("attachment").click();
+  await expect(page.getByTestId("toast")).toContainText("Opening Q4 plan.pdf");
+  // No double-click wait on a phone: the tap opened it and saved nothing.
+  await expect.poll(() => readFile(join(app.dataDir, "opened.txt"), "utf8").catch(() => "")).toContain("Q4 plan.pdf");
+  expect(await readdir(join(app.dataDir, "downloads")).catch(() => [])).toEqual([]);
+
+  await page.getByTestId("attachment-save").click();
+  await expect(page.getByTestId("toast")).toContainText("Saved Q4 plan.pdf to Downloads");
+  expect(await readFile(join(app.dataDir, "downloads", "Q4 plan.pdf"), "utf8")).toBe("%PDF-1.4 fake plan");
+});
