@@ -489,8 +489,17 @@ pub fn get_autostart(app: AppHandle, state: State<'_, AppState>) -> Result<bool>
     if fake_autostart() {
         return Ok(state.db.with(|c| db::get_setting(c, "fake_autostart"))?.as_deref() == Some("1"));
     }
-    use tauri_plugin_autostart::ManagerExt;
-    app.autolaunch().is_enabled().map_err(|e| AppError::Other(e.to_string()))
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        app.autolaunch().is_enabled().map_err(|e| AppError::Other(e.to_string()))
+    }
+    // Phones start nothing at sign-in; background sync is a scheduled job instead.
+    #[cfg(mobile)]
+    {
+        let _ = app;
+        Ok(false)
+    }
 }
 
 /// Starts PeetMail (hidden, in the tray) when you sign in to Windows.
@@ -499,9 +508,17 @@ pub fn set_autostart(app: AppHandle, state: State<'_, AppState>, enabled: bool) 
     if fake_autostart() {
         return state.db.with(|c| db::set_setting(c, "fake_autostart", if enabled { "1" } else { "0" }));
     }
-    use tauri_plugin_autostart::ManagerExt;
-    let l = app.autolaunch();
-    if enabled { l.enable() } else { l.disable() }.map_err(|e| AppError::Other(e.to_string()))
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        let l = app.autolaunch();
+        if enabled { l.enable() } else { l.disable() }.map_err(|e| AppError::Other(e.to_string()))
+    }
+    #[cfg(mobile)]
+    {
+        let _ = (app, enabled);
+        Err(AppError::Other("Starting at sign-in isn't available on this device.".into()))
+    }
 }
 
 /// Test hook (debug builds only): panics on a background thread, so tests can check that

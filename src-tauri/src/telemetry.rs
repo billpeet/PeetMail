@@ -568,8 +568,8 @@ fn sample(app: &tauri::AppHandle) {
     }
 }
 
-/// Resident set size: the second field of /proc/self/statm, in pages.
-#[cfg(target_os = "linux")]
+/// Resident set size: the second field of /proc/self/statm, in pages (Android has it too).
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn working_set() -> Option<u64> {
     let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
     // SAFETY: sysconf has no preconditions.

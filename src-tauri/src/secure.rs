@@ -70,16 +70,16 @@ pub fn unprotect(data: &[u8]) -> Result<Vec<u8>> {
 #[cfg(windows)]
 pub fn init(_data_dir: &std::path::Path, _keyring: bool) {}
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub use linux::init;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn protect(data: &[u8]) -> Result<Vec<u8>> {
     // Signing in: the user is there to answer an unlock prompt.
     sealed::seal(&linux::key(true)?, data)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn unprotect(data: &[u8]) -> Result<Vec<u8>> {
     sealed::open(&linux::key(false)?, data)
 }
@@ -93,21 +93,21 @@ pub fn init_for_tests() {
     init(&dir, false);
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
 pub fn init(_data_dir: &std::path::Path, _keyring: bool) {}
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
 pub fn protect(_: &[u8]) -> Result<Vec<u8>> {
     Err(AppError::Other("secure storage isn't implemented on this platform".into()))
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
 pub fn unprotect(_: &[u8]) -> Result<Vec<u8>> {
     Err(AppError::Other("secure storage isn't implemented on this platform".into()))
 }
 
 /// Authenticated encryption under a 256-bit key: `version (1) | nonce (12) | ciphertext+tag`.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod sealed {
     use super::{AppError, Result};
     use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305, NONCE_LEN};
@@ -146,9 +146,13 @@ mod sealed {
     }
 }
 
-#[cfg(target_os = "linux")]
+/// Also Android's, which has no keyring: the key lives in a private file in the app's own
+/// folder, which Android's app sandbox keeps from every other app (and backups are off,
+/// AndroidManifest.xml). TODO(android stage 4): wrap it with an Android Keystore key.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod linux {
     use super::{AppError, Result};
+    #[cfg(target_os = "linux")]
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, OnceLock};
@@ -186,7 +190,13 @@ mod linux {
             return Err(AppError::Other(why.clone()));
         }
         let (dir, keyring) = CONFIG.get().ok_or_else(|| AppError::Other("secure storage used before setup".into()))?;
+        #[cfg(target_os = "linux")]
         let found = if *keyring { load_or_create(dir, &SecretService) } else { load_or_create(dir, &NoKeyring) };
+        #[cfg(target_os = "android")]
+        let found = {
+            let _ = keyring;
+            load_or_create(dir, &NoKeyring)
+        };
         match found {
             Ok(k) => {
                 *cached = Some(k);
@@ -206,6 +216,7 @@ mod linux {
         /// There's no keyring: no Secret Service on the session bus, or no collection to use.
         Absent(String),
         /// There is one, but it said no: locked and the prompt dismissed, or a failed call.
+        #[cfg_attr(target_os = "android", allow(dead_code))] // Android has no keyring to refuse
         Refused(String),
     }
 
@@ -300,20 +311,25 @@ mod linux {
     }
 
     /// The Secret Service (org.freedesktop.secrets) on the session bus.
+    #[cfg(target_os = "linux")]
     struct SecretService;
 
+    #[cfg(target_os = "linux")]
     fn attributes() -> HashMap<&'static str, &'static str> {
         HashMap::from([("application", crate::datadir::IDENTIFIER), ("purpose", "token-key")])
     }
 
+    #[cfg(target_os = "linux")]
     fn connect() -> std::result::Result<secret_service::blocking::SecretService<'static>, KeyringError> {
         secret_service::blocking::SecretService::connect(secret_service::EncryptionType::Dh).map_err(|e| KeyringError::Absent(e.to_string()))
     }
 
+    #[cfg(target_os = "linux")]
     fn refusal(e: secret_service::Error) -> KeyringError {
         KeyringError::Refused(e.to_string())
     }
 
+    #[cfg(target_os = "linux")]
     impl Keyring for SecretService {
         fn get(&self) -> std::result::Result<Option<Vec<u8>>, KeyringError> {
             let ss = connect()?;

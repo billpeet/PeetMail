@@ -94,7 +94,7 @@ fn show_error_box(caption: &str, message: &str) {
 /// Linux has no system message box API; the desktop's dialog tools do the job (zenity on
 /// GNOME and most others, kdialog on KDE). Without either the reason is only in the log
 /// and on stderr.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn show_error_box(caption: &str, message: &str) {
     use std::process::Command;
     eprintln!("{caption}: {message}");
@@ -123,7 +123,15 @@ fn show_error_box(caption: &str, message: &str) {
     }
 }
 
+/// Android has no message box a native library can raise before the webview is up; the
+/// reason goes to the log (logcat). TODO(android stage 1): show it in the webview.
+#[cfg(target_os = "android")]
+fn show_error_box(caption: &str, message: &str) {
+    log::error!("{caption}: {message}");
+}
+
 /// Brings the main window back (tray click, second launch, tray menu).
+#[cfg(desktop)]
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
@@ -133,6 +141,7 @@ fn show_main_window(app: &tauri::AppHandle) {
 }
 
 /// Tray icon: click to open; menu with Open, Sync now, Quit.
+#[cfg(desktop)]
 fn create_tray(app: &tauri::App) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -178,6 +187,7 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
 
 /// `dev_data`: a dev build gets a WebView profile (localStorage) of its own, apart from the
 /// installed app's.
+#[cfg(desktop)]
 fn create_main_window(app: &tauri::App, dev_data: bool) -> tauri::Result<()> {
     let headless = testenv::flag("PEETMAIL_HEADLESS");
     // Started at sign-in (autostart): wait in the tray.
@@ -217,6 +227,13 @@ fn create_main_window(app: &tauri::App, dev_data: bool) -> tauri::Result<()> {
     Ok(())
 }
 
+/// A phone has one full-screen window: no size, decorations, tray or profile to choose.
+#[cfg(mobile)]
+fn create_main_window(app: &tauri::App, _dev_data: bool) -> tauri::Result<()> {
+    tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default()).build()?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let started = std::time::Instant::now();
@@ -226,7 +243,9 @@ pub fn run() {
     let dev_build = tauri::is_dev();
     let mut data_dir_override = testenv::get("PEETMAIL_DATA_DIR").map(std::path::PathBuf::from);
     let is_test = data_dir_override.is_some();
-    let dev_data = dev_build && !is_test;
+    // A phone running `tauri android dev` has no checkout to keep `.peetmail-dev` in, and no
+    // installed copy beside it to protect: it uses its own app data folder.
+    let dev_data = cfg!(desktop) && dev_build && !is_test;
     // Logging isn't up yet: how the copy went is reported in setup.
     let mut dev_seed = Ok(false);
     if dev_data {
@@ -238,8 +257,8 @@ pub fn run() {
     }
     // First, before Tauri: crash reporting covers startup, and the crash reporter process
     // (this binary run again) stops inside here.
-    let roaming_dir = data_dir_override.clone().or_else(datadir::app_data_dir);
-    if let Some(dir) = &roaming_dir {
+    #[cfg(desktop)]
+    if let Some(dir) = data_dir_override.clone().or_else(datadir::app_data_dir) {
         crash::init_early(&dir.join("peetmail.db"));
     }
     let sync_interval = Duration::from_secs(
@@ -264,20 +283,28 @@ pub fn run() {
     // install is single-instance: a second launch just shows the running window. A dev
     // build shares the installed app's identifier, so it skips this too (else launching it
     // would just bring up the installed app).
+    #[cfg_attr(mobile, allow(unused_mut))]
     let mut builder = tauri::Builder::default();
-    if data_dir_override.is_none() {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main_window(app)));
+    #[cfg(desktop)]
+    {
+        if data_dir_override.is_none() {
+            builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main_window(app)));
+        }
+        builder = builder
+            .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
+            .plugin(tauri_plugin_updater::Builder::new().build());
     }
     builder
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
-        .on_window_event(|window, event| {
+        .on_window_event(|_window, event| {
             // Coming back to PeetMail is a good moment to pick up settings changed elsewhere.
             if let tauri::WindowEvent::Focused(true) = event {
                 sync::store::WAKE.notify_one();
             }
             // Closing the window hides it to the tray (unless that's turned off).
+            #[cfg(desktop)]
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let window = _window;
                 let state = window.app_handle().state::<state::AppState>();
                 if state.preferences().map(|p| p.close_to_tray).unwrap_or(true) {
                     api.prevent_close();
@@ -286,7 +313,6 @@ pub fn run() {
             }
         })
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             // The log plugin is added here (not with the others) so its logger can be wrapped:
             // recent lines ride along with crash reports as breadcrumbs (see crash.rs).
@@ -304,6 +330,10 @@ pub fn run() {
                 }
             };
             std::fs::create_dir_all(&dir)?;
+            // Desktop starts crash reporting before Tauri (datadir::app_data_dir); Android's
+            // data folder is only known from here.
+            #[cfg(target_os = "android")]
+            crash::init_early(&dir.join("peetmail.db"));
             // Mail, logs and the database live here. Some distros make home folders readable
             // by everyone; this folder isn't (Windows' %APPDATA% already isn't).
             #[cfg(unix)]
@@ -353,6 +383,7 @@ pub fn run() {
             telemetry::record_ms("app.startup", started.elapsed().as_secs_f64() * 1000.0, &[]);
             telemetry::start_sampling(app.handle().clone());
             // Headless test runs mustn't put icons in the user's taskbar.
+            #[cfg(desktop)]
             if !testenv::flag("PEETMAIL_HEADLESS") {
                 create_tray(app)?;
             }

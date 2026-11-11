@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+#[cfg(desktop)]
 use sentry::integrations::minidump::MinidumpIntegration;
 use sentry::protocol::{Breadcrumb, Context, Event, Exception, Frame, Level, Mechanism, Stacktrace, User};
 use sentry::ClientOptions;
@@ -141,9 +142,13 @@ fn start(minidumps: bool) {
         scrub_breadcrumb(&mut b);
         Some(b)
     }));
+    // Android has no second process to catch a native crash with; panics are still reported.
+    #[cfg(desktop)]
     if minidumps {
         options = options.add_integration(MinidumpIntegration::new().process_name("PeetMail crash reporter"));
     }
+    #[cfg(mobile)]
+    let _ = minidumps;
     *GUARD.lock().unwrap_or_else(|e| e.into_inner()) = Some(sentry::init(options));
 }
 
@@ -160,6 +165,7 @@ pub fn after_db(db: &db::Db) {
     *INSTALL_ID.write().unwrap_or_else(|e| e.into_inner()) = Some(install_id.clone());
     let user = User { id: Some(install_id), ..Default::default() };
     sentry::configure_scope(|s| s.set_user(Some(user.clone())));
+    #[cfg(desktop)]
     sentry::with_integration(|m: &MinidumpIntegration, _| m.set_user(Some(user.clone())));
     refresh_known(db);
 }

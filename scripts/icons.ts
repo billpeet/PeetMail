@@ -5,12 +5,13 @@
 //
 // `tauri icon` makes the full set from the master; this keeps only the files the repo uses,
 // swaps the hand-tuned sizes into icon.ico, and writes 32x32.png and tray.png from them.
+// The Android launcher icons (adaptive, every density) go into src-tauri/gen/android.
 // The small SVGs are rendered with Edge (installed with Windows) through Playwright.
 //
 //   pnpm icons
 
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "@playwright/test";
@@ -19,6 +20,7 @@ import { readIco, replaceSizes, writeIco } from "./ico.ts";
 const ICONS = "src-tauri/icons";
 const SOURCE = `${ICONS}/source`;
 const HAND_TUNED = [16, 24, 32];
+const ANDROID_RES = "src-tauri/gen/android/app/src/main/res";
 
 const out = mkdtempSync(join(tmpdir(), "peetmail-icons-"));
 try {
@@ -30,6 +32,8 @@ try {
   for (const f of readdirSync(out)) {
     if (existsSync(join(ICONS, f)) && f.includes(".")) copyFileSync(join(out, f), join(ICONS, f));
   }
+  // Android's launcher icons go straight into the generated project's resources.
+  if (existsSync(ANDROID_RES)) cpSync(join(out, "android"), ANDROID_RES, { recursive: true });
 
   const browser = await chromium.launch({ channel: "msedge" });
   const page = await browser.newPage({ deviceScaleFactor: 1 });

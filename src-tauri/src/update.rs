@@ -12,12 +12,16 @@
 //! On Linux only the AppImage updates itself: the new AppImage replaces the file in place
 //! (no root needed) and PeetMail relaunches. Any other install (built from source, a distro
 //! package) is left to whatever installed it.
+//!
+//! Android has no Tauri updater: the APK installer takes its place (docs/ANDROID.md,
+//! Stage 6). Until then updates there are off, with the reason shown in Settings.
 
 use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
+#[cfg(desktop)]
 use tauri_plugin_updater::{Update, UpdaterExt};
 use url::Url;
 
@@ -100,7 +104,9 @@ fn channel(app: &AppHandle) -> String {
 /// (`APPIMAGE`, set by the AppImage runtime) in a folder it can write to: the updater
 /// replaces that file.
 pub fn not_installable(os: &str, appimage: bool, folder_writable: bool) -> Option<&'static str> {
-    if os != "linux" {
+    if os == "android" {
+        Some("PeetMail on Android can't update itself yet. Install the new APK from the releases page.")
+    } else if os != "linux" {
         None
     } else if !appimage {
         Some("PeetMail updates itself only when run as an AppImage. Update this copy the way you installed it.")
@@ -130,10 +136,26 @@ fn folder_writable(_: &std::path::Path) -> bool {
     true
 }
 
+/// Stands in for the plugin's `Update` on Android, where nothing is ever found
+/// (`not_installable` turns checks off before they'd get here).
+#[cfg(mobile)]
+struct Update {
+    version: String,
+    body: Option<String>,
+}
+
+#[cfg(mobile)]
+impl Update {
+    fn install(&self, _bytes: &[u8]) -> std::result::Result<(), String> {
+        Err("not available on this device".into())
+    }
+}
+
 /// Set just before restarting into an update, read (and cleared) by the next start.
 const KEY_RESTART_TO_UPDATE: &str = "restarted_to_update";
 
 /// Whether this start is the restart after installing an update.
+#[cfg_attr(mobile, allow(dead_code))] // the restart after an update is desktop only
 pub fn take_restart_flag(app: &AppHandle) -> bool {
     let Some(state) = app.try_state::<AppState>() else { return false };
     state
@@ -273,6 +295,12 @@ pub async fn check(app: &AppHandle) -> UpdateStatus {
     }
 }
 
+#[cfg(mobile)]
+async fn find_and_download(_app: &AppHandle, _url: Url) -> std::result::Result<Option<(Update, Vec<u8>)>, String> {
+    Err("PeetMail on this device can't update itself.".into())
+}
+
+#[cfg(desktop)]
 async fn find_and_download(app: &AppHandle, url: Url) -> std::result::Result<Option<(Update, Vec<u8>)>, tauri_plugin_updater::Error> {
     let updater = app
         .updater_builder()
@@ -401,11 +429,12 @@ mod tests {
     }
 
     #[test]
-    fn linux_updates_only_an_appimage() {
+    fn self_update_needs_windows_or_a_writable_appimage() {
         assert!(not_installable("windows", false, false).is_none());
         assert!(not_installable("linux", true, true).is_none());
         assert!(not_installable("linux", false, true).is_some_and(|m| m.contains("AppImage")));
         assert!(not_installable("linux", true, false).is_some_and(|m| m.contains("write to")));
+        assert!(not_installable("android", false, false).is_some_and(|m| m.contains("APK")));
     }
 
     #[test]

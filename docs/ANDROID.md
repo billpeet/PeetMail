@@ -1,0 +1,179 @@
+# Android plan
+
+PeetMail on Android phones, built from the same Tauri 2 app: the Rust core unchanged where it can be, platform code behind `cfg`, and the Svelte UI gaining a compact touch layout next to the desktop one. Work is split into stages; each one ships on its own and leaves `pnpm verify` green. Stages 0–6 together are v1: nothing goes to the phone as a release until background sync works.
+
+## Scope of v1
+
+| | |
+|---|---|
+| Devices | Phones. Tablets and Chromebooks aren't targeted; they get whichever form factor their width picks, untested. |
+| Android version | Android 17 and newer (`minSdk` = `targetSdk` = Android 17's API level). |
+| Accounts | Microsoft 365 and Outlook.com. Gmail too if the Stage 0 sign-in spike works; it doesn't block the release. |
+| Background sync | Yes. New mail arrives and notifies with PeetMail closed. |
+| Distribution | A signed APK from GitHub Releases, installed by hand. No Play Store. |
+
+## Status
+
+| Stage | State |
+|---|---|
+| 0 Spike: it builds and signs in | Done (emulator; Gmail and a real phone still to try) |
+| 1 Rust core on Android | Not started |
+| 2 Compact layout (testable on Windows) | Not started |
+| 3 Touch: gestures, sheets, back button | Not started |
+| 4 Phone-native plumbing (files, share, notifications, secure storage) | Not started |
+| 5 Background sync | Not started |
+| 6 Distribution | Not started |
+
+## Decisions
+
+| Question | Decision | Why |
+|---|---|---|
+| Separate app or same codebase | Same repo, same crate, same SvelteKit app. `tauri android init` adds `src-tauri/gen/android`. | The Rust core (sync, outbox, SQLite, sanitising, settings sync) is most of the value and has no UI in it. `lib.rs` already has `#[cfg_attr(mobile, tauri::mobile_entry_point)]` and the crate already builds `cdylib`. |
+| Where the platform split lives in Rust | `#[cfg(desktop)]` / `#[cfg(mobile)]` for Tauri features (tray, windows, updater), `#[cfg(target_os = "android")]` for OS code. Android is a third arm, never a fallback. | Android is `unix` but **not** `target_os = "linux"`, so today it silently falls into `secure.rs`'s "not implemented" arm and fails to compile wherever only two arms exist (`health::free_space`, `telemetry.rs`, `support.rs`). |
+| One UI or two | One UI with a **form factor**: `desktop` (today's) or `compact` (single pane, touch). Chosen by width, not by OS, with a test knob to force it. | A phone is always compact, and so is a narrow desktop window. Most mobile UI can then be built and tested on Windows with the existing harness. |
+| Keyboard first on a phone | Touch first, but every touch control dispatches a keymap binding by id (`keymap.run("archive")`), never its own code path. | Keeps "every action is a binding" true: the palette, the `?` overlay, hardware keyboards (DeX, Chromebook, Bluetooth) and the E2E tests all keep working. |
+| Sign-in | Stage 0 keeps the loopback redirect as is. Microsoft moves to a custom-scheme redirect (deep link) in Stage 4. Google is a spike (see Risks). | RFC 8252 loopback works on Android and needs no code change, so the spike proves the rest of the stack first. The browser tab left behind and the manual switch back are what a deep link fixes. |
+| Token storage | Android Keystore holds a non-exportable AES key that wraps the data key; the existing `sealed` (AES-GCM, `ring`) code encrypts the blob. Exposed to Rust through a small Kotlin plugin. | Same shape as the Linux arm (keyring key + `sealed`), so `protect`/`unprotect` keep their signature. |
+| Background sync | In v1: a WorkManager periodic job (15 min is Android's floor), plus sync while open and on resume. No push. | Android stops a backgrounded process's timers. Graph push needs a public webhook holding mail tokens, and the sync server is built never to see tokens (`docs/SYNC.md`). |
+| Updates | No `tauri-plugin-updater` on Android (it's desktop only). PeetMail checks the same release feed, downloads the new APK, verifies it and hands it to the system installer, which asks you to confirm. See Stage 6. | A sideloaded app can't update itself silently. |
+| Crash reports | Rust panics through the existing `sentry` setup; minidumps off on Android (they need a second crash-reporter process). | Native crashes and ANRs would need `sentry-android`; revisit after real use. |
+| Minimum Android version | Android 17. | One target version: current Android System WebView, the notification permission, edge-to-edge and predictive back all behave one way, with no compatibility branches. It's your phone; widening later only means testing older versions. |
+| Defaults that change on a phone | Body cache 100 MB (desktop 500 MB), mail window unchanged at 90 days. | Storage, not metadata, is the constraint; metadata for 90 days is a few MB. |
+| Settings sync | Works unchanged and is the recommended way to set up the phone: join with the passphrase, get signatures, snippets, splits and the account list, then sign in to each account. | Tokens never sync, by design. |
+
+## Stage 0: spike, it builds and signs in
+
+### What we found (2026-11-11, Android 17 emulator)
+
+- **It builds and runs.** `rusqlite`, `ring`, `argon2`, `ammonia` and `reqwest` + rustls compile with NDK 29 and work. The app reaches the setup screen, signs in, and syncs the inbox. IPC and the sandboxed body iframe work with the existing CSP; the page is served from `http://tauri.localhost`.
+- **NDK 29 has no compiler for API 37.** The Rust library is built for Tauri's default API level; gradle's `minSdk = 37` is what keeps PeetMail off older phones. Native code built for a lower level runs unchanged on 17.
+- **Android 17 cuts backgrounded apps off the network** (`dumpsys netpolicy`: `blocked=APP_BACKGROUND`, allowed only while in front). This shapes three things:
+  - Sign-in: the loopback redirect arrives while Chrome is in front, so the token request fails. On mobile, `auth::sign_in` now keeps the code and retries every 2 s for up to 5 minutes, and the browser page says "Go back to PeetMail to finish". The deep-link redirect (Stage 4) is the real fix.
+  - The first sync just after sign-in failed once with the same error, then worked on the next cycle.
+  - Background sync can only work through WorkManager (Stage 5), which the system lets onto the network; a plain background timer gets nothing.
+- **Saved sign-ins** use the Linux "no keyring" path for now: a random key in a private file in the app's folder. Android Auto Backup and device-to-device transfer are off (`data_extraction_rules.xml`), so the key never travels with the tokens. Keystore wrapping is still Stage 4.
+- **Crash reporting** starts in `setup` on Android (the data folder is only known there); minidumps are off.
+- Notifications need `notification:default` in the capability (the plugin's JS checks permission at startup).
+
+### Building it
+
+Needs Android Studio's SDK with platform 37, build-tools 37 and NDK 29 (`ANDROID_HOME`, `NDK_HOME`), plus `rustup target add aarch64-linux-android x86_64-linux-android`.
+
+```sh
+# x86_64 for the emulator, aarch64 for a phone. The built-in sign-in apps come from the same
+# env vars CI uses (PEETMAIL_MS_CLIENT_ID, ...); without them the setup screen asks for an ID.
+pnpm tauri android build --debug --apk --target x86_64
+adb -s emulator-5554 install -r src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+# Clippy for the Android arms (CC/AR/linker pointed at the NDK's clang, as tauri does):
+cargo clippy --manifest-path src-tauri/Cargo.toml --target aarch64-linux-android --all-targets -- -D warnings
+# The app's own log:
+adb shell run-as com.peetsoftware.peetmail cat logs/PeetMail.log
+```
+
+### The plan as written
+
+Goal: an APK on a real phone that signs in to a Microsoft account and shows the inbox in today's (unusable, desktop-sized) UI. Answers the risky questions before any UI work.
+
+- Toolchain on Windows: Android Studio, SDK + NDK, `JAVA_HOME`, `rustup target add aarch64-linux-android x86_64-linux-android`. Note what Tauri needs on Windows (symlinks / Developer Mode) in `tests/README.md`.
+- `pnpm tauri android init`; commit `src-tauri/gen/android` (minus build output). Add `tauri.android.conf.json` for Android-only config, merged like `tauri.linux.conf.json`.
+- Get it compiling with the minimum `cfg`: tray, `WebviewWindowBuilder` sizing and decorations, single-instance, autostart and updater behind `#[cfg(desktop)]`; `tray-icon` moved to a desktop-only `tauri` feature in `Cargo.toml`.
+- `pnpm tauri android dev` against a device: `TAURI_DEV_HOST` is already wired in `vite.config.js`.
+- Check by hand, write down results here:
+  - `rusqlite` (bundled), `ring`, `argon2`, `ammonia` and `reqwest` + rustls build with the NDK and work.
+  - The CSP origins on Android (`ipc:`, `http://ipc.localhost`, and whatever the Android WebView serves the app from) still let IPC through; the sandboxed `srcdoc` iframe renders bodies and still blocks remote images.
+  - Loopback sign-in: the opener plugin opens Chrome, the redirect reaches the listener while PeetMail is in the background.
+  - Cold start time and memory on a mid-range phone.
+
+## Stage 1: Rust core on Android
+
+Everything the spike stubbed, done properly. `cargo clippy --target aarch64-linux-android -- -D warnings` and a cross-compiled `cargo test --no-run` join CI (a new `android` job next to `linux`).
+
+| Module | Android arm |
+|---|---|
+| `lib.rs` | No tray, no close-to-tray, no `--minimized`, no message box (`fatal_startup_error` shows a page in the webview instead). Window built without size or decorations. |
+| `datadir.rs` | `app_data_dir()` runs before Tauri (for `crash::init_early`) and returns `None` on Android; crash init moves after `app.path()` there. The dev-copy logic is desktop only. |
+| `secure.rs` | Stage 1 ships with a placeholder that refuses to save tokens; the Keystore plugin lands in Stage 4. Until then the spike build keeps tokens in memory only. |
+| `health.rs` | `free_space` via `statvfs` (share the Linux arm: `cfg(any(target_os = "linux", target_os = "android"))`, `libc` becomes a dependency for both). |
+| `telemetry.rs` | Memory sampling via `/proc/self/statm`, likewise shared with Linux. |
+| `support.rs` | Diagnostics export goes to the share sheet (Stage 4); until then into the app's cache dir. |
+| `crash.rs` | `MinidumpIntegration` off on Android. |
+| `update.rs` | Not compiled on mobile; `update_status` returns "managed by the store" so the UI hides the update controls. |
+| `commands.rs` | `get_autostart`/`set_autostart`/`quit_app` return unsupported on mobile; the UI hides them. |
+| `mail.rs`, `outbox.rs` | Unchanged. The 60 s loop and the 1 s snooze ticker run while the process is alive; on resume, call `actions::wake` and `sync_all` at once. |
+
+Lifecycle: listen for Tauri's resume/pause events. On pause, flush the outbox (`outbox::kick`) so an archive done just before switching apps reaches the server.
+
+## Stage 2: compact layout, testable on Windows
+
+The bulk of the UI work, done against the desktop harness so it's tested by the existing Playwright suite and fake Graph.
+
+- `src/lib/platform.ts`: add `"android"`. **Bug to fix first:** Android's user agent contains `Linux`, so `platformOf` returns `"linux"` today.
+- New `src/lib/layout.svelte.ts`: `formFactor` from a `matchMedia("(max-width: 640px)")` rune, overridable by `PEETMAIL_FORM_FACTOR=compact` (in `testenv.rs`, passed to the UI in `bootstrap`). Components read `layout.compact`; no `navigator.userAgent` sniffing in components.
+- Compact shell (in `+page.svelte`, split into `DesktopShell` / `CompactShell` if it gets unwieldy):
+  - **No** `TitleBar`, `ResizeHandle`, `RightPane`, reading-pane toggle (`v`) or split-view.
+  - A stack of screens: list → reader → composer, one at a time, driven by the same `mail.view` state.
+  - Bottom bar replacing `Rail`: Mail, Calendar, Search, More (Settings, Help).
+  - Mailbox drawer (Inbox, Snoozed, Scheduled, Drafts, Done, Sent, All, Trash) from the list header; splits as a horizontally scrolling tab strip under it.
+  - Compose as a floating button on the list.
+- `ThreadList`: rows at least 48 px tall, two-line layout (sender + time, subject + preview). The virtual list's row height becomes a layout value.
+- `Reader`: full screen, bottom action bar (archive, delete, snooze, reply, overflow with reply all / forward / flag / unread / load images). The invite card and join chip stack full width.
+- **Email bodies at phone width.** Most HTML mail is laid out for 600 px. `MessageBody`/`HtmlView` scale the measured content to fit (`zoom` on the iframe document), with pinch-zoom and horizontal pan in the iframe. Plain and responsive mail render at 1:1.
+- `Composer`: full screen; To/Cc collapse into one row; the rich-text toolbar sits above the on-screen keyboard (`visualViewport`); send-later and snippets in the overflow menu.
+- Calendar: `DayView` (exists) is the compact default with a 3-day option; `WeekView` only on wide screens. An agenda list (next 14 days) as a second tab. `EventDetails`, `EventEditor`, `QuickAdd` become full-screen sheets.
+- Overlays become bottom sheets: `SnoozePicker`, `Palette` (doubles as the search screen), the account picker. `Settings` becomes a list of pages; desktop-only rows (autostart, close to tray, updates, shortcuts) are hidden.
+- Safe areas: `env(safe-area-inset-*)` padding; edge-to-edge is mandatory at this `targetSdk`.
+- `data-testid` on every new control. Tests: a `compact` Playwright project that runs the harness at 400×860 with `PEETMAIL_FORM_FACTOR=compact` and covers list → reader → archive → undo, compose → send, mailbox drawer, calendar day view, settings. Screenshots via `pnpm drive` at phone size.
+
+## Stage 3: touch
+
+- Swipe on a list row: right to archive (`e`), left to snooze (`h`); both configurable later. The row slides away and undo (`z`) works the same. Long press starts a selection (the existing batching), tap toggles more rows.
+- Swipe left/right in the reader for next/previous conversation (`j`/`k`).
+- Pull to refresh on the list (`sync_now`).
+- Back: Android's back gesture closes the top sheet, then reader → list, then Calendar → Mail, then leaves the app. One handler that runs the `Esc` binding's logic, hooked to Tauri's back-button event. Android 17 has predictive back (the previous screen peeks during the gesture), so check how the WebView handles that.
+- Undo toast gets a tappable Undo button (desktop shows the `z` hint).
+- Tests: the `compact` project drives touch with CDP `Input.dispatchTouchEvent` (works over WebView2's CDP) for swipe, long press and pull to refresh.
+
+## Stage 4: phone-native plumbing
+
+A small Kotlin Tauri plugin (`src-tauri/plugins/android/` or a workspace crate) for what Rust can't do alone:
+
+- **Keystore** wrap/unwrap for `secure.rs` (see Decisions). Lost key (factory reset, backup restored to another phone) means signing in again, like a DPAPI blob on a new Windows profile. Exclude the database from Android Auto Backup.
+- **Sign-in via deep link** for Microsoft: register `com.peetsoftware.peetmail://auth` (or an App Link) on the built-in Entra app, open the authorize URL in a Custom Tab, receive the code through `tauri-plugin-deep-link`. Loopback stays for desktop and for your-own-app accounts.
+- **Attachments**: open through an intent with a `FileProvider` URI; save through the system "Save to" picker (MediaStore/SAF) instead of Downloads.
+- **Composer attachments**: file picker (`tauri-plugin-dialog`), since drag and drop doesn't exist here.
+- **Share into PeetMail**: "Share → PeetMail" with files or a link opens the composer with them attached.
+- **Notifications**: `tauri-plugin-notification` works on Android; ask for `POST_NOTIFICATIONS` the first time notifications are on, not at launch. Tapping one opens the conversation. Snooze and send-later reminders use scheduled notifications, so they fire with the app closed.
+- **Diagnostics export and Report a problem**: the share sheet.
+- `docs/user/`: an Android page (getting started, gestures, what's desktop only), with the unit test that checks pages and links.
+
+## Stage 5: background sync (required for v1)
+
+- A WorkManager periodic job (15 min, network required) that starts the Rust core headless and runs one `outbox::kick` + `mail::sync_all`, then raises new-mail notifications.
+- Needs a refactor first: `sync_all` and the outbox take an `AppHandle` today. Split out a core context (`Db`, HTTP clients, an event sink) that the Tauri app and the worker both build, so the worker doesn't need a webview.
+- Must coexist with a foreground app process (the database is already one connection behind a mutex; the worker either skips when the app is open or goes through the same process).
+- Battery: one delta request per folder per run, same as desktop. Settings gets "Check for mail: every 15 min / hourly / only when open".
+
+## Stage 6: distribution
+
+- Signing key kept like the updater key (`docs/SECRETS.md`); CI builds a signed APK on tags (arm64 only: no 32-bit phones run Android 17).
+- Channel: the signed APK attached to each GitHub Release (AAB not needed). Canary and stable follow the desktop channels.
+- Updates in the app: the release feed gains an `android` entry (APK URL, size, SHA-256, minisign signature from the existing updater key). PeetMail checks it as desktop does, downloads in the background, checks the signature, and opens the system installer (`REQUEST_INSTALL_PACKAGES`, a `FileProvider` URI). The first install needs "Install unknown apps" allowed for the browser; later ones for PeetMail itself. Covered by the fake update server in the harness tests on the Rust side.
+- The APK signing key must never change: Android refuses an update signed by a different key, and the only way out is uninstalling, which loses local data.
+- CI: an `android` job builds the APK, boots an emulator, installs it and runs a smoke test, like `tests/linux/smoke.sh`. Android WebView exposes CDP (`adb forward ... localabstract:webview_devtools_remote_<pid>`), so a later step can run a few Playwright specs on the emulator against fake Graph at `10.0.2.2`.
+- `CHANGELOG.md` and the What's New dialog work as on desktop; `docs/RELEASING.md` gains the Android steps.
+
+## Risks
+
+| Risk | Plan |
+|---|---|
+| **Google sign-in** (preferred for v1, not required). Google ties OAuth client types to platforms. The Desktop client's loopback redirect may work from a phone technically, but Google's Android client type wants custom schemes off and the Credential Manager / Authorization API, which doesn't hand a refresh token to a public client. | Spike in Stage 0: try the existing Desktop client over loopback. If Google blocks or flags it, v1 ships Microsoft only and Gmail accounts show as "not available on Android yet" (including ones arriving through settings sync). |
+| Email rendering at 360–400 px | The fit-to-width step in Stage 2 is the main readability risk; build it early with a corpus of real newsletters in the fake Graph fixtures. |
+| Android WebView versions | Updated through the Play Store, so it can lag. Less of a worry at Android 17, but still show a "please update Android System WebView" page below a minimum Chrome version. |
+| `+page.svelte` growth | Already 487 lines of keymap and layout. Splitting the shells keeps desktop changes from breaking compact and vice versa. |
+| E2E is Windows-only | Stage 2/3 tests run the compact layout on Windows, which covers layout and logic but not Android's WebView, keyboard or lifecycle. The emulator job in Stage 6 closes some of the gap; the rest is checked by hand per release. |
+| Background limits | Android 17 can defer WorkManager jobs (Doze, app standby buckets, battery saver), so "every 15 min" is a best case. Show the last sync time on the list; settings links to the system battery setting to let PeetMail run unrestricted. |
+| Process death | Android can kill PeetMail any time it's in the background. The outbox is already durable in SQLite and drafts save as you type, so nothing should be lost; test it with "Don't keep activities". |
+
+## Open questions
+
+1. Android 17 is very recent; does your phone run it? If you meant API level 17 (Android 4.2): Tauri needs API 24 at least.

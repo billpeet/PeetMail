@@ -217,7 +217,8 @@ pub fn free_space(dir: &Path) -> Option<u64> {
 }
 
 /// Space an unprivileged process can use (`f_bavail`, not the root-reserved `f_bfree`).
-#[cfg(target_os = "linux")]
+/// Android's bionic has the same call.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn free_space(dir: &Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;

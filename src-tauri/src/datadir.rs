@@ -68,6 +68,11 @@ fn copy_without_pending_work(from: &Path, to: &Path) -> std::io::Result<()> {
 /// (the crash reporter starts first thing). `%APPDATA%\<id>` on Windows,
 /// `$XDG_DATA_HOME/<id>` (default `~/.local/share/<id>`) on Linux.
 pub fn app_data_dir() -> Option<PathBuf> {
+    // Android's app folder (`/data/user/0/<id>/...`) comes from the JNI context, which only
+    // Tauri has; `HOME` there isn't the app's.
+    if cfg!(target_os = "android") {
+        return None;
+    }
     if cfg!(windows) {
         std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join(IDENTIFIER))
     } else {

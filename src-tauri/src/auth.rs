@@ -184,7 +184,7 @@ pub async fn sign_in(
     app: &AppHandle,
     http: &reqwest::Client,
     cfg: &OAuthConfig,
-    cancel: tokio::sync::oneshot::Receiver<()>,
+    mut cancel: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(TokenSet, Option<String>)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
@@ -230,17 +230,71 @@ pub async fn sign_in(
         r = tokio::time::timeout(SIGN_IN_TIMEOUT, wait_for_code(listener, &state)) => {
             r.map_err(|_| AppError::Auth("timed out waiting for the browser".into()))??
         }
-        _ = cancel => return Err(AppError::Auth("cancelled".into())),
+        _ = &mut cancel => return Err(AppError::Auth("cancelled".into())),
     };
 
-    let mut form = vec![
-        ("client_id", cfg.client_id.as_str()),
-        ("grant_type", "authorization_code"),
-        ("code", &code),
-        ("redirect_uri", &redirect_uri),
-        ("code_verifier", &verifier),
-    ];
-    token_request(http, cfg, &cfg.scopes, &mut form, None).await
+    let exchange = || async {
+        let mut form = vec![
+            ("client_id", cfg.client_id.as_str()),
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("redirect_uri", redirect_uri.as_str()),
+            ("code_verifier", verifier.as_str()),
+        ];
+        token_request(http, cfg, &cfg.scopes, &mut form, None).await
+    };
+    // Android cuts a backgrounded app off the network, and the redirect arrives while the
+    // browser is in front: keep the code and try again until the user switches back.
+    // TODO(android stage 4): the deep-link redirect brings PeetMail to the front first.
+    if cfg!(mobile) {
+        retry_while_offline(exchange, is_offline, OFFLINE_RETRY_EVERY, OFFLINE_RETRY_FOR, cancel).await
+    } else {
+        exchange().await
+    }
+}
+
+/// How often, and for how long, a token exchange that couldn't reach the network is retried
+/// (mobile). Authorization codes last about ten minutes.
+const OFFLINE_RETRY_EVERY: Duration = Duration::from_secs(2);
+const OFFLINE_RETRY_FOR: Duration = Duration::from_secs(5 * 60);
+
+/// The request never got a connection: no network, or the OS blocked it (Android, in the
+/// background). A server that answered, even with an error, doesn't count.
+fn is_offline(e: &AppError) -> bool {
+    matches!(e, AppError::Http(e) if e.is_connect() || (e.is_request() && e.status().is_none()))
+}
+
+/// Runs `op` until it succeeds or fails for a reason `offline` doesn't cover, waiting `every`
+/// between tries. Gives up with the last error after `limit`, or with "cancelled" when
+/// `cancel` fires.
+async fn retry_while_offline<T, F, Fut>(
+    mut op: F,
+    offline: fn(&AppError) -> bool,
+    every: Duration,
+    limit: Duration,
+    mut cancel: tokio::sync::oneshot::Receiver<()>,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let deadline = tokio::time::Instant::now() + limit;
+    let mut logged = false;
+    loop {
+        match op().await {
+            Err(e) if offline(&e) && tokio::time::Instant::now() + every < deadline => {
+                if !logged {
+                    log::info!("sign-in: no network to finish with ({e}); retrying until PeetMail is back in front");
+                    logged = true;
+                }
+            }
+            other => return other,
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(every) => {}
+            _ = &mut cancel => return Err(AppError::Auth("cancelled".into())),
+        }
+    }
 }
 
 /// New tokens for the same scopes the account signed in with.
@@ -313,6 +367,7 @@ async fn wait_for_code(listener: TcpListener, expected_state: &str) -> Result<St
         };
 
         let message = match &outcome {
+            Ok(_) if cfg!(mobile) => "Signed in. Go back to PeetMail to finish.",
             Ok(_) => "Signed in. You can close this tab and go back to PeetMail.",
             Err(_) => "Sign-in failed. Go back to PeetMail for details.",
         };
@@ -364,6 +419,51 @@ mod tests {
         let payload = URL_SAFE_NO_PAD.encode(br#"{"email":"b@gmail.com","name":"Boris Dragon"}"#);
         assert_eq!(id_token_name(&format!("eyJhbGciOiJub25lIn0.{payload}.")), Some("Boris Dragon".into()));
         assert_eq!(id_token_name("not-a-jwt"), None);
+    }
+
+    fn offline() -> AppError {
+        AppError::Other("offline".into())
+    }
+
+    fn is_fake_offline(e: &AppError) -> bool {
+        matches!(e, AppError::Other(m) if m == "offline")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retries_a_token_exchange_until_the_network_is_back() {
+        let tries = std::sync::atomic::AtomicU32::new(0);
+        let (_keep, cancel) = tokio::sync::oneshot::channel();
+        let op = || async {
+            if tries.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 3 { Err(offline()) } else { Ok(42) }
+        };
+        let r = retry_while_offline(op, is_fake_offline, Duration::from_secs(2), Duration::from_secs(60), cancel).await;
+        assert_eq!(r.unwrap(), 42);
+        assert_eq!(tries.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn gives_up_on_other_errors_at_once_and_on_offline_after_the_limit() {
+        let (_keep, cancel) = tokio::sync::oneshot::channel();
+        let r: Result<()> = retry_while_offline(|| async { Err(AppError::Auth("invalid_grant".into())) }, is_fake_offline, Duration::from_secs(2), Duration::from_secs(60), cancel).await;
+        assert!(matches!(r, Err(AppError::Auth(m)) if m == "invalid_grant"));
+
+        let tries = std::sync::atomic::AtomicU32::new(0);
+        let (_keep, cancel) = tokio::sync::oneshot::channel();
+        let op = || async {
+            tries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err::<(), _>(offline())
+        };
+        let r = retry_while_offline(op, is_fake_offline, Duration::from_secs(2), Duration::from_secs(10), cancel).await;
+        assert!(r.is_err_and(|e| is_fake_offline(&e)));
+        assert_eq!(tries.load(std::sync::atomic::Ordering::SeqCst), 5);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_stops_the_retries() {
+        let (stop, cancel) = tokio::sync::oneshot::channel();
+        stop.send(()).unwrap();
+        let r: Result<()> = retry_while_offline(|| async { Err(offline()) }, is_fake_offline, Duration::from_secs(2), Duration::from_secs(60), cancel).await;
+        assert!(matches!(r, Err(AppError::Auth(m)) if m == "cancelled"));
     }
 
     #[test]

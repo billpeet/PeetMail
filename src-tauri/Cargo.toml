@@ -36,12 +36,8 @@ log = "0.4.34"
 tauri-plugin-log = "2.10.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 tauri-plugin-notification = "2"
-tauri-plugin-autostart = "2"
-tauri-plugin-single-instance = "2"
-# No `zip` feature: our update artifacts are the NSIS setup exe and the AppImage themselves
-# (createUpdaterArtifacts v2), so the zip/tar extraction code (and its advisories) isn't needed.
-tauri-plugin-updater = { version = "2.14.0", default-features = false, features = ["rustls-tls", "system-proxy"] }
-sentry = { version = "0.49", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls", "minidump"] }
+# Minidumps (a crash-reporter process) are desktop only; see the desktop table below.
+sentry = { version = "0.49", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }
 regex = "1"
 opentelemetry = { version = "0.33", default-features = false, features = ["trace", "metrics", "logs"] }
 opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "metrics", "logs"] }
@@ -53,6 +49,16 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 ring = "0.17"
 argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 
+# Desktop only: the tray, autostart, single-instance and the self-updater have no Android
+# counterpart (Android updates go through the APK installer, docs/ANDROID.md).
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
+# No `zip` feature: our update artifacts are the NSIS setup exe and the AppImage themselves
+# (createUpdaterArtifacts v2), so the zip/tar extraction code (and its advisories) isn't needed.
+tauri-plugin-updater = { version = "2.14.0", default-features = false, features = ["rustls-tls", "system-proxy"] }
+sentry = { version = "0.49", default-features = false, features = ["minidump"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_UI_WindowsAndMessaging", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_Registry", "Win32_Storage_FileSystem"] }
 
@@ -60,6 +66,8 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 # Saved sign-ins: a key in the desktop keyring (Secret Service) encrypts them (secure.rs).
 # zbus 5 is already in the tree (notifications, single-instance); ring is a dependency above.
 secret-service = { version = "5.2", features = ["rt-async-io-crypto-rust"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 libc = "0.2"
 
 
@@ -83,3 +91,5 @@ opt-level = 2
 
 [dev-dependencies]
 semver = "1"
+# Paused-clock tests (auth.rs retries).
+tokio = { version = "1.54.1", features = ["test-util"] }

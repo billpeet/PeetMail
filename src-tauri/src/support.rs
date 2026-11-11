@@ -254,14 +254,30 @@ fn os_version() -> String {
 }
 
 /// "Ubuntu 24.04.1 LTS (Linux 6.8.0-45-generic)" from os-release and the kernel.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn os_version() -> String {
     let release = std::fs::read_to_string("/etc/os-release").or_else(|_| std::fs::read_to_string("/usr/lib/os-release")).unwrap_or_default();
     let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
     describe_linux(&release, kernel.trim())
 }
 
-#[cfg_attr(windows, allow(dead_code))]
+/// "Android 17 (API 37)" from the system properties.
+#[cfg(target_os = "android")]
+fn os_version() -> String {
+    let prop = |name: &str| -> Option<String> {
+        let name = std::ffi::CString::new(name).ok()?;
+        let mut buf = [0 as libc::c_char; libc::PROP_VALUE_MAX as usize];
+        // SAFETY: a NUL-terminated name and a buffer of PROP_VALUE_MAX bytes, as the call requires.
+        let len = unsafe { libc::__system_property_get(name.as_ptr(), buf.as_mut_ptr()) };
+        // SAFETY: the call NUL-terminates what it writes.
+        (len > 0).then(|| unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned())
+    };
+    let release = prop("ro.build.version.release").unwrap_or_default();
+    let sdk = prop("ro.build.version.sdk").unwrap_or_default();
+    format!("Android {release} (API {sdk})")
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn describe_linux(os_release: &str, kernel: &str) -> String {
     let field = |name: &str| {
         os_release.lines().find_map(|l| l.strip_prefix(name)?.strip_prefix('=')).map(|v| v.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
@@ -273,7 +289,7 @@ pub fn describe_linux(os_release: &str, kernel: &str) -> String {
 /// Linux only: what the desktop is and how PeetMail was installed, which explain most
 /// tray, keyring and rendering differences. None of it names the user or the PC.
 fn linux_session() -> Option<Value> {
-    if cfg!(windows) {
+    if !cfg!(target_os = "linux") {
         return None;
     }
     let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
