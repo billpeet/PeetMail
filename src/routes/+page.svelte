@@ -31,6 +31,7 @@
   import ScheduledList from "#lib/components/ScheduledList.svelte";
   import DraftsList from "#lib/components/DraftsList.svelte";
   import SnoozePicker from "#lib/components/SnoozePicker.svelte";
+  import { isDesktop } from "#lib/platform.js";
 
   // `base`: signed in, nothing modal open (global keys). `ready`: base, in the mail views
   // (every mail binding hangs off it, so mail keys don't act on a hidden conversation
@@ -218,7 +219,7 @@
       { id: "reader.images", keys: "i", label: "Load images", group: "Read", when: inReader, run: () => (mail.imagesFor = mail.threadFor) },
 
       { id: "app.palette", keys: "ctrl+k", label: "Command palette", group: "App", when: () => !!mail.account && !mail.composerActive && mail.overlay !== "palette", run: () => (mail.overlay = "palette") },
-      { id: "app.quit", keys: "ctrl+q", label: "Quit PeetMail", group: "App", when: () => !!mail.account, run: () => api.quitApp() },
+      { id: "app.quit", keys: "ctrl+q", label: "Quit PeetMail", group: "App", when: () => !!mail.account && isDesktop(), run: () => api.quitApp() },
       { id: "app.update.install", keys: "ctrl+shift+u", label: "Restart to update", group: "App", when: () => !!mail.account && updates.ready, run: () => updates.install() },
       { id: "app.help.docs", keys: "F1", label: "Help", group: "App", when: () => !mail.composerActive && mail.overlay !== "docs", run: () => mail.openHelp() },
       { id: "app.health.dismiss", keys: "", label: "Dismiss warnings", group: "App", when: () => health.visible.length > 0, run: () => health.dismiss() },

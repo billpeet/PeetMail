@@ -17,7 +17,7 @@ PeetMail on Android phones, built from the same Tauri 2 app: the Rust core uncha
 | Stage | State |
 |---|---|
 | 0 Spike: it builds and signs in | Done (emulator; Gmail and a real phone still to try) |
-| 1 Rust core on Android | Not started |
+| 1 Rust core on Android | Done |
 | 2 Compact layout (testable on Windows) | Not started |
 | 3 Touch: gestures, sheets, back button | Not started |
 | 4 Phone-native plumbing (files, share, notifications, secure storage) | Not started |
@@ -86,28 +86,26 @@ Goal: an APK on a real phone that signs in to a Microsoft account and shows the 
 
 ## Stage 1: Rust core on Android
 
-Everything the spike stubbed, done properly. `cargo clippy --target aarch64-linux-android -- -D warnings` and a cross-compiled `cargo test --no-run` join CI (a new `android` job next to `linux`).
+Done. Every module builds for Android with its own arm (never a silent fallback), and `pnpm lint:android` (clippy plus a test build for `aarch64-linux-android`) runs on any PC with the NDK and in CI's `android` job.
 
 | Module | Android arm |
 |---|---|
-| `lib.rs` | No tray, no close-to-tray, no `--minimized`, no message box (`fatal_startup_error` shows a page in the webview instead). Window built without size or decorations. |
-| `datadir.rs` | `app_data_dir()` runs before Tauri (for `crash::init_early`) and returns `None` on Android; crash init moves after `app.path()` there. The dev-copy logic is desktop only. |
-| `secure.rs` | Stage 1 ships with a placeholder that refuses to save tokens; the Keystore plugin lands in Stage 4. Until then the spike build keeps tokens in memory only. |
-| `health.rs` | `free_space` via `statvfs` (share the Linux arm: `cfg(any(target_os = "linux", target_os = "android"))`, `libc` becomes a dependency for both). |
-| `telemetry.rs` | Memory sampling via `/proc/self/statm`, likewise shared with Linux. |
-| `support.rs` | Diagnostics export goes to the share sheet (Stage 4); until then into the app's cache dir. |
-| `crash.rs` | `MinidumpIntegration` off on Android. |
-| `update.rs` | Not compiled on mobile; `update_status` returns "managed by the store" so the UI hides the update controls. |
-| `commands.rs` | `get_autostart`/`set_autostart`/`quit_app` return unsupported on mobile; the UI hides them. |
-| `mail.rs`, `outbox.rs` | Unchanged. The 60 s loop and the 1 s snooze ticker run while the process is alive; on resume, call `actions::wake` and `sync_all` at once. |
-
-Lifecycle: listen for Tauri's resume/pause events. On pause, flush the outbox (`outbox::kick`) so an archive done just before switching apps reaches the server.
+| `lib.rs` | No tray, close-to-tray, `--minimized`, single-instance, autostart or updater plugin. One full-screen window. A fatal startup error is logged and the app closes; Android refuses to install an older APK over a newer one, so "database from a newer version" can't happen there. |
+| `lifecycle.rs` | New. Tracks whether PeetMail is in front (`WindowEvent::Suspended`/`Resumed`): going to the background sends the outbox while the network is still there; coming back syncs at once; the 60 s sync timer skips its runs while in the background (Android has PeetMail offline then). Notifications show only while PeetMail isn't in front. |
+| `datadir.rs` | `app_data_dir()` is `None` on Android; crash reporting starts in `setup` once Tauri knows the folder. No dev-copy of the data. |
+| `secure.rs` | The Linux "no keyring" path: a private key file. Keystore wrapping is Stage 4. |
+| `health.rs`, `telemetry.rs` | Share the Linux arms (`statvfs`, `/proc/self/statm`). |
+| `support.rs` | "Android 17 (API 37)" in diagnostics, from the system properties. |
+| `crash.rs` | No minidumps. |
+| `update.rs` | No Tauri updater; updates show as off, with "install the new APK" as the reason. |
+| `commands.rs` | Autostart reads as off and can't be set. Saving and opening attachments and saving diagnostics say they aren't available on Android yet, rather than writing to a folder no one can browse (Stage 4: "Save to" picker, `FileProvider`). |
+| `state.rs` | Body cache defaults to 100 MB (desktop 500 MB). |
+| UI | `platformOf` tells Android from Linux. Settings hides the tray and autostart rows; `Ctrl+Q` (quit) is desktop only. |
 
 ## Stage 2: compact layout, testable on Windows
 
 The bulk of the UI work, done against the desktop harness so it's tested by the existing Playwright suite and fake Graph.
 
-- `src/lib/platform.ts`: add `"android"`. **Bug to fix first:** Android's user agent contains `Linux`, so `platformOf` returns `"linux"` today.
 - New `src/lib/layout.svelte.ts`: `formFactor` from a `matchMedia("(max-width: 640px)")` rune, overridable by `PEETMAIL_FORM_FACTOR=compact` (in `testenv.rs`, passed to the UI in `bootstrap`). Components read `layout.compact`; no `navigator.userAgent` sniffing in components.
 - Compact shell (in `+page.svelte`, split into `DesktopShell` / `CompactShell` if it gets unwieldy):
   - **No** `TitleBar`, `ResizeHandle`, `RightPane`, reading-pane toggle (`v`) or split-view.

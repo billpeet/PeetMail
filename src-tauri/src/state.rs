@@ -52,7 +52,8 @@ pub const KEY_CLOSE_TO_TRAY: &str = "close_to_tray";
 pub const DEFAULT_UNDO_SEND_SECS: i64 = 10;
 
 pub const DEFAULT_CACHE_DAYS: i64 = 90;
-pub const DEFAULT_BODY_CACHE_MB: i64 = 500;
+/// A phone has less room, and its storage is shared with photos and apps.
+pub const DEFAULT_BODY_CACHE_MB: i64 = if cfg!(target_os = "android") { 100 } else { 500 };
 
 pub struct AppState {
     pub db: Db,

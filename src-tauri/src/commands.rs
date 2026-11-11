@@ -634,6 +634,7 @@ pub fn feedback_options() -> crate::support::FeedbackOptions {
 /// Saves the diagnostics zip to Downloads and shows it. Returns where it went.
 #[tauri::command]
 pub async fn export_diagnostics(app: AppHandle) -> Result<String> {
+    not_on_phones_yet("Saving diagnostics")?;
     let path = tauri::async_runtime::spawn_blocking(move || crate::support::export_diagnostics(&app))
         .await
         .map_err(|e| AppError::Other(e.to_string()))??;
@@ -1358,6 +1359,16 @@ pub async fn list_attachments(state: State<'_, AppState>, message_id: i64) -> Re
     mail::list_attachments(&state, message_id).await
 }
 
+/// Android has no Downloads folder an app can write to directly, and other apps only open
+/// files shared through a content URI; both wait for docs/ANDROID.md Stage 4. Until then
+/// these say so instead of saving where nobody can find the file.
+fn not_on_phones_yet(what: &str) -> Result<()> {
+    if cfg!(mobile) {
+        return Err(AppError::Other(format!("{what} isn't available on Android yet.")));
+    }
+    Ok(())
+}
+
 /// Saves an attachment to Downloads and reveals it in Explorer. Returns the saved path.
 #[tauri::command]
 pub async fn download_attachment(
@@ -1367,6 +1378,7 @@ pub async fn download_attachment(
     attachment_id: String,
     name: String,
 ) -> Result<String> {
+    not_on_phones_yet("Saving attachments")?;
     let dir = match crate::testenv::get("PEETMAIL_DOWNLOAD_DIR") {
         Some(d) => std::path::PathBuf::from(d),
         None => tauri::Manager::path(&app).download_dir().map_err(|e| AppError::Other(e.to_string()))?,
@@ -1405,6 +1417,7 @@ pub async fn open_attachment(
     attachment_id: String,
     name: String,
 ) -> Result<()> {
+    not_on_phones_yet("Opening attachments")?;
     let dir = attachments_dir(&app)?;
     let path = mail::attachment_for_opening(&state, message_id, &attachment_id, &name, &dir).await?;
     if let Some(log) = crate::testenv::get("PEETMAIL_OPEN_LOG") {

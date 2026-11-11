@@ -127,10 +127,9 @@ fn app_in_front(app: &AppHandle) -> bool {
         .is_some_and(|w| w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false))
 }
 
-/// TODO(android stage 4): track resume/pause; until then a phone always notifies.
 #[cfg(mobile)]
 fn app_in_front(_app: &AppHandle) -> bool {
-    false
+    crate::lifecycle::in_front()
 }
 
 /// Shows toasts (or, in tests, appends them to PEETMAIL_NOTIFY_LOG as JSON lines).

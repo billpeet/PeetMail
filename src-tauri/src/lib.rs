@@ -17,6 +17,7 @@ mod graph;
 mod graph_send;
 mod health;
 mod items;
+mod lifecycle;
 mod mail;
 mod meeting_links;
 mod notify;
@@ -296,7 +297,8 @@ pub fn run() {
     }
     builder
         .plugin(tauri_plugin_notification::init())
-        .on_window_event(|_window, event| {
+        .on_window_event(|window, event| {
+            lifecycle::on_window_event(window.app_handle(), event);
             // Coming back to PeetMail is a good moment to pick up settings changed elsewhere.
             if let tauri::WindowEvent::Focused(true) = event {
                 sync::store::WAKE.notify_one();
@@ -304,7 +306,6 @@ pub fn run() {
             // Closing the window hides it to the tray (unless that's turned off).
             #[cfg(desktop)]
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let window = _window;
                 let state = window.app_handle().state::<state::AppState>();
                 if state.preferences().map(|p| p.close_to_tray).unwrap_or(true) {
                     api.prevent_close();
@@ -422,6 +423,12 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
+                    // A phone in the background has no network (lifecycle.rs); coming back
+                    // syncs at once instead.
+                    if !lifecycle::in_front() {
+                        tokio::time::sleep(sync_interval).await;
+                        continue;
+                    }
                     // Retry anything queued while offline before pulling changes.
                     outbox::kick(&handle);
                     if let Err(e) = mail::sync_all(&handle).await {
