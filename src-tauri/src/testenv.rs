@@ -28,6 +28,7 @@
 //! | PEETMAIL_OTLP_HEADERS         | Headers for it, `key=value,key=value`                     |
 //! | PEETMAIL_OTLP_METRIC_INTERVAL_MS | Metric export interval (default 30s)                   |
 //! | PEETMAIL_WEBVIEW2_ARGS        | WebView2 browser arguments, replacing Tauri's (DevTools port) |
+//! | PEETMAIL_WINDOW_SIZE          | Window size `412x915`, below the usual minimum: the phone layout (`pnpm drive start --phone`) |
 //! | PEETMAIL_BUILTIN_MS_CLIENT_ID | Act as if this Microsoft app were built in                |
 //! | PEETMAIL_BUILTIN_GOOGLE_CLIENT_ID / _SECRET | Act as if this Google client were built in  |
 
@@ -37,6 +38,14 @@ pub fn get(name: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// `PEETMAIL_WINDOW_SIZE=412x915` as (width, height). Desktop only: a phone's window is the screen.
+#[cfg(desktop)]
+pub fn window_size() -> Option<(f64, f64)> {
+    let v = get("PEETMAIL_WINDOW_SIZE")?;
+    let (w, h) = v.split_once('x')?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
 }
 
 pub fn flag(name: &str) -> bool {

@@ -70,7 +70,8 @@ Every test attaches `final-screen.png`, `app.log` and `console.log` to the repor
 `pnpm drive` keeps one app + fake server running between shell calls, for exploring, reproducing bugs and checking UI changes. `pnpm drive help` lists every command. Typical loop:
 
 ```sh
-pnpm drive start                 # headless, signed in, synced. --fresh stops at setup, --dev hot-reloads
+pnpm drive start                 # headless, signed in, synced. --fresh stops at setup, --dev hot-reloads,
+                                 # --phone gives a phone-sized window (the compact layout)
 pnpm drive key j j Enter         # prints a JSON state line after each action
 pnpm drive body                  # text of the open message
 pnpm drive shot                  # prints a PNG path; read it to see the screen

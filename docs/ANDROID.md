@@ -18,7 +18,7 @@ PeetMail on Android phones, built from the same Tauri 2 app: the Rust core uncha
 |---|---|
 | 0 Spike: it builds and signs in | Done (emulator; Gmail and a real phone still to try) |
 | 1 Rust core on Android | Done |
-| 2 Compact layout (testable on Windows) | Not started |
+| 2 Compact layout (testable on Windows) | Done |
 | 3 Touch: gestures, sheets, back button | Not started |
 | 4 Phone-native plumbing (files, share, notifications, secure storage) | Not started |
 | 5 Background sync | Not started |
@@ -104,31 +104,24 @@ Done. Every module builds for Android with its own arm (never a silent fallback)
 
 ## Stage 2: compact layout, testable on Windows
 
-The bulk of the UI work, done against the desktop harness so it's tested by the existing Playwright suite and fake Graph.
+Done. One set of components with two layouts; `layout.compact` (`src/lib/layout.svelte.ts`) is true on Android and on any window 640 px wide or less, so the E2E suite drives the phone layout on Windows (`test.use({ phone: true })`, `tests/e2e/compact.spec.ts`) and `pnpm drive start --phone` shows it. Checked on the Android 17 emulator against a real mailbox too.
 
-- New `src/lib/layout.svelte.ts`: `formFactor` from a `matchMedia("(max-width: 640px)")` rune, overridable by `PEETMAIL_FORM_FACTOR=compact` (in `testenv.rs`, passed to the UI in `bootstrap`). Components read `layout.compact`; no `navigator.userAgent` sniffing in components.
-- Compact shell (in `+page.svelte`, split into `DesktopShell` / `CompactShell` if it gets unwieldy):
-  - **No** `TitleBar`, `ResizeHandle`, `RightPane`, reading-pane toggle (`v`) or split-view.
-  - A stack of screens: list → reader → composer, one at a time, driven by the same `mail.view` state.
-  - Bottom bar replacing `Rail`: Mail, Calendar, Search, More (Settings, Help).
-  - Mailbox drawer (Inbox, Snoozed, Scheduled, Drafts, Done, Sent, All, Trash) from the list header; splits as a horizontally scrolling tab strip under it.
-  - Compose as a floating button on the list.
-- `ThreadList`: rows at least 48 px tall, two-line layout (sender + time, subject + preview). The virtual list's row height becomes a layout value.
-- `Reader`: full screen, bottom action bar (archive, delete, snooze, reply, overflow with reply all / forward / flag / unread / load images). The invite card and join chip stack full width.
-- **Email bodies at phone width.** Most HTML mail is laid out for 600 px. `MessageBody`/`HtmlView` scale the measured content to fit (`zoom` on the iframe document), with pinch-zoom and horizontal pan in the iframe. Plain and responsive mail render at 1:1.
-- `Composer`: full screen; To/Cc collapse into one row; the rich-text toolbar sits above the on-screen keyboard (`visualViewport`); send-later and snippets in the overflow menu.
-- Calendar: `DayView` (exists) is the compact default with a 3-day option; `WeekView` only on wide screens. An agenda list (next 14 days) as a second tab. `EventDetails`, `EventEditor`, `QuickAdd` become full-screen sheets.
-- Overlays become bottom sheets: `SnoozePicker`, `Palette` (doubles as the search screen), the account picker. `Settings` becomes a list of pages; desktop-only rows (autostart, close to tray, updates, shortcuts) are hidden.
-- Safe areas: `env(safe-area-inset-*)` padding; edge-to-edge is mandatory at this `targetSdk`.
-- `data-testid` on every new control. Tests: a `compact` Playwright project that runs the harness at 400×860 with `PEETMAIL_FORM_FACTOR=compact` and covers list → reader → archive → undo, compose → send, mailbox drawer, calendar day view, settings. Screenshots via `pnpm drive` at phone size.
+- **Shell** (`CompactShell.svelte`, rendered instead of the rail, panes and footer): a header (mailboxes drawer, title, sync indicator, search), the split tabs as a scrolling strip, the list or the calendar's day, a floating compose button, and a bottom bar (Mail, Calendar, Search, Settings). No title bar, reading pane, right pane or resize handles. The mailbox list (`src/lib/mailboxes.ts`) is shared with the desktop rail.
+- **List**: three-line rows (sender and time, subject, preview), 84 px tall; no hover actions (swipes come in Stage 3).
+- **Reader**: full screen; back and previous/next on top; archive, delete, snooze, reply and a "more" menu (reply all, forward, flag, unread, spam, load images) at the bottom.
+- **Mail at phone width**: the body's own CSS already squeezes tables and images; whatever still can't shrink (fixed `min-width` blocks, unbreakable rows) is zoomed out to fit (`fitScale`, floor 0.4), refitted when the frame's width changes.
+- **Dialogs**: every backdrop and box carries `dialog-backdrop` and `dialog-panel` (a full-screen page) or `dialog-sheet` (full width, from the top, clear of the keyboard); `app.css` does the rest. Settings and Help are a list of sections, each opening on its own page. Key hints on buttons and hint lines (`key-hints`) are hidden.
+- **Composer**: full screen; formatting tools on one row, the send buttons on the next.
+- **Safe areas**: `viewport-fit=cover`, and `--safe-top`/`--safe-bottom` from `env(safe-area-inset-*)` pad the header, bottom bar and dialogs. Works edge to edge on Android 17's WebView.
+- **Back button** (pulled forward from Stage 3): Android's back sends Esc, so it does what Esc does (close a menu, the drawer, a dialog, a Settings section, leave the conversation or the search); with nothing to close it returns to the inbox, and from the inbox PeetMail goes to the background (`move_to_background`, `moveTaskToBack`) instead of closing. The undo toast has an Undo button.
+- **Not done here**: the week view, agenda and 3-day calendar views (the day view is the phone's calendar for now); collapsing To/Cc into one row; a pinch-zoom for mail bodies. Revisit after using it.
 
 ## Stage 3: touch
 
 - Swipe on a list row: right to archive (`e`), left to snooze (`h`); both configurable later. The row slides away and undo (`z`) works the same. Long press starts a selection (the existing batching), tap toggles more rows.
 - Swipe left/right in the reader for next/previous conversation (`j`/`k`).
 - Pull to refresh on the list (`sync_now`).
-- Back: Android's back gesture closes the top sheet, then reader → list, then Calendar → Mail, then leaves the app. One handler that runs the `Esc` binding's logic, hooked to Tauri's back-button event. Android 17 has predictive back (the previous screen peeks during the gesture), so check how the WebView handles that.
-- Undo toast gets a tappable Undo button (desktop shows the `z` hint).
+- Back and the toast's Undo button: done in Stage 2. Still to check: Android 17's predictive back animation (the previous screen peeking during the gesture) with the WebView.
 - Tests: the `compact` project drives touch with CDP `Input.dispatchTouchEvent` (works over WebView2's CDP) for swipe, long press and pull to refresh.
 
 ## Stage 4: phone-native plumbing

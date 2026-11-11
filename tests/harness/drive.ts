@@ -13,7 +13,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, openSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Page } from "@playwright/test";
-import { connect, ensureBuilt, freePort, killTree, launchApp, ROOT, screenState, signIn } from "./app.ts";
+import { connect, ensureBuilt, freePort, killTree, launchApp, ROOT, screenState, signIn, PHONE_VIEWPORT } from "./app.ts";
 import { CLIENT_ID } from "./fake-graph.ts";
 
 const DIR = join(ROOT, ".peetmail-test");
@@ -23,10 +23,11 @@ const SHOTS = join(DIR, "shots");
 const HELP = `pnpm drive <command> [args]
 
 Session
-  start [--fresh] [--headed] [--dev] [--count N] [--seed N]
+  start [--fresh] [--headed] [--dev] [--phone] [--count N] [--seed N]
         Start the fake Graph server and the app (headless unless --headed).
         Signs in and waits for the first sync unless --fresh (stays on setup screen).
         --dev runs \`pnpm tauri dev\` (hot reload) instead of the prebuilt debug exe.
+        --phone makes the window phone-sized (412x915): the compact layout (docs/ANDROID.md).
   stop [--clean]       Stop app and fake server (--clean also deletes the data dir)
   restart              Restart only the app, keeping its data (tests persistence)
   status               Session info plus current screen state
@@ -68,6 +69,8 @@ type Session = {
   headed: boolean;
   dev: boolean;
   startedAt: string;
+  /** `start --phone`: a phone-sized window, the compact layout. */
+  phone?: boolean;
 };
 
 function loadSession(): Session {
@@ -154,6 +157,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     const fresh = flag(args, "--fresh");
     const headed = flag(args, "--headed");
     const dev = flag(args, "--dev");
+    const phone = flag(args, "--phone");
     const count = option(args, "--count");
     const seed = option(args, "--seed");
 
@@ -173,8 +177,8 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 
     const dataDir = join(DIR, "data");
     rmSync(dataDir, { recursive: true, force: true });
-    const app = await launchApp({ fake, dataDir, headed, dev, detached: true });
-    const session = { fakePid: fakeProc.pid, fakePort, appPid: app.proc.pid, cdpPort: app.cdpPort, dataDir, headed, dev, startedAt: new Date().toISOString() };
+    const app = await launchApp({ fake, dataDir, headed, dev, detached: true, viewport: phone ? PHONE_VIEWPORT : undefined });
+    const session = { fakePid: fakeProc.pid, fakePort, appPid: app.proc.pid, cdpPort: app.cdpPort, dataDir, headed, dev, phone, startedAt: new Date().toISOString() };
     writeFileSync(SESSION, JSON.stringify(session, null, 2));
 
     try {
@@ -221,7 +225,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     await new Promise((r) => setTimeout(r, 500));
     const origin = `http://127.0.0.1:${s.fakePort}`;
     const fake = { origin, graphUrl: `${origin}/v1.0`, authorityUrl: `${origin}/oauth` };
-    const app = await launchApp({ fake, dataDir: s.dataDir, headed: s.headed, dev: s.dev, detached: true });
+    const app = await launchApp({ fake, dataDir: s.dataDir, headed: s.headed, dev: s.dev, detached: true, viewport: s.phone ? PHONE_VIEWPORT : undefined });
     writeFileSync(SESSION, JSON.stringify({ ...s, appPid: app.proc.pid, cdpPort: app.cdpPort }, null, 2));
     console.log(`restarted: app pid ${app.proc.pid} (cdp ${app.cdpPort})`);
     await printState(app.page);

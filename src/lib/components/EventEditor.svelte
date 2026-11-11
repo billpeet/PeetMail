@@ -505,8 +505,8 @@
   const field = "rounded-md border border-ink-700 bg-ink-950 px-2 py-1 text-sm text-ink-100 outline-none focus:border-accent disabled:opacity-50";
 </script>
 
-<div data-testid="event-editor" role="presentation" class="fixed inset-x-0 top-9 bottom-0 z-40 grid place-items-center bg-black/60">
-  <div class="flex max-h-[calc(100vh-2.25rem-3rem)] w-[min(820px,calc(100vw-4rem))] flex-col rounded-xl border border-ink-700 bg-ink-900 shadow-2xl">
+<div data-testid="event-editor" role="presentation" class="dialog-backdrop fixed inset-x-0 top-(--chrome-top) bottom-0 z-40 grid place-items-center bg-black/60">
+  <div class="dialog-panel flex max-h-[calc(100vh-2.25rem-3rem)] w-[min(820px,calc(100vw-4rem))] flex-col rounded-xl border border-ink-700 bg-ink-900 shadow-2xl">
     <div class="shrink-0 space-y-2 p-5 pb-3">
       <div class="flex items-center justify-between text-xs tracking-wide text-ink-500 uppercase">
         <span data-testid="editor-mode">{creating ? "New event" : seriesScope ? "Edit series" : "Edit event"}</span>

@@ -559,6 +559,29 @@ pub fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
+/// Android's back button on the root screen: PeetMail goes to the background, as other apps
+/// do, rather than closing (it keeps its state and comes back where it was).
+#[tauri::command]
+pub fn move_to_background(app: AppHandle) -> Result<()> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let window = app.get_webview_window("main").ok_or_else(|| AppError::Other("no window".into()))?;
+        window
+            .with_webview(|webview| {
+                webview.jni_handle().exec(|env, activity, _webview| {
+                    if let Err(e) = env.call_method(activity, "moveTaskToBack", "(Z)Z", &[jni::objects::JValue::Bool(1)]) {
+                        log::warn!("moving to the background: {e}");
+                    }
+                });
+            })
+            .map_err(|e| AppError::Other(e.to_string()))?;
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = app;
+    Ok(())
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Privacy {

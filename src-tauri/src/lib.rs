@@ -215,6 +215,11 @@ fn create_main_window(app: &tauri::App, dev_data: bool) -> tauri::Result<()> {
     if let Some(args) = testenv::get("PEETMAIL_WEBVIEW2_ARGS") {
         builder = builder.additional_browser_args(&args);
     }
+    // Tests and the drive CLI: a phone-sized window, so the page lays out compact for good
+    // (a viewport override lasts only as long as one DevTools connection).
+    if let Some((w, h)) = testenv::window_size() {
+        builder = builder.min_inner_size(w, h).inner_size(w, h);
+    }
     builder = if minimized && !headless {
         builder.visible(false).center()
     } else if headless {
@@ -494,6 +499,7 @@ pub fn run() {
             commands::get_autostart,
             commands::set_autostart,
             commands::quit_app,
+            commands::move_to_background,
             commands::open_external,
             commands::debug_panic,
             commands::set_snippets,

@@ -19,7 +19,6 @@
   import Composer from "#lib/components/Composer.svelte";
   import Palette from "#lib/components/Palette.svelte";
   import { count } from "#lib/format.js";
-  import type { MailView } from "#lib/mail.svelte.js";
   import { Columns2, PanelRight, Rows3, Search, Settings as SettingsIcon, SquarePen, X } from "@lucide/svelte";
   import WeekView from "#lib/components/WeekView.svelte";
   import Rail from "#lib/components/Rail.svelte";
@@ -31,7 +30,11 @@
   import ScheduledList from "#lib/components/ScheduledList.svelte";
   import DraftsList from "#lib/components/DraftsList.svelte";
   import SnoozePicker from "#lib/components/SnoozePicker.svelte";
-  import { isDesktop } from "#lib/platform.js";
+  import { isDesktop, platform } from "#lib/platform.js";
+  import { layout } from "#lib/layout.svelte.js";
+  import CompactShell from "#lib/components/CompactShell.svelte";
+  import { onBackButtonPress } from "@tauri-apps/api/app";
+  import { MAILBOX_TITLES } from "#lib/mailboxes.js";
 
   // `base`: signed in, nothing modal open (global keys). `ready`: base, in the mail views
   // (every mail binding hangs off it, so mail keys don't act on a hidden conversation
@@ -64,8 +67,6 @@
     return !!el && (el.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName));
   };
 
-  /** Names of the mailboxes, for the list header. */
-  const MAILBOX_TITLES: Record<MailView, string> = { inbox: "Inbox", done: "Done", sent: "Sent", drafts: "Drafts", snoozed: "Snoozed", scheduled: "Scheduled", all: "All mail", trash: "Trash", junk: "Junk" };
 
   let searchInput: HTMLInputElement | undefined = $state();
 
@@ -127,7 +128,26 @@
   // A reply stays with its conversation: put away on leaving it, shown again on coming back.
   $effect(() => mail.followScreen());
 
+  /**
+   * Android's back button: whatever Esc would do here (close a dialog, leave the
+   * conversation, end the search), else back to the inbox, else PeetMail goes to the
+   * background like any app's root screen.
+   */
+  function androidBack() {
+    const target = (document.activeElement as HTMLElement | null) ?? document.body;
+    const esc = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    target.dispatchEvent(esc);
+    if (esc.defaultPrevented) return;
+    if (mail.account && (mail.view !== "list" || mail.mailbox !== "inbox" || mail.splitIndex !== 0)) {
+      mail.showMail();
+      mail.switchSplit(0);
+    } else {
+      api.moveToBackground().catch(() => {});
+    }
+  }
+
   onMount(() => {
+    const back = platform === "android" ? onBackButtonPress(androidBack) : null;
     mail.init();
     api.outboxStatus().then((s) => mail.setOutbox(s));
     mail.refreshScheduled();
@@ -241,6 +261,7 @@
     return () => {
       unregister();
       unlisten.forEach((p) => p.then((f) => f()));
+      back?.then((l) => l.unregister());
     };
   });
 
@@ -269,6 +290,8 @@
     <!-- bootstrap is a single local query; nothing to show -->
   {:else if !mail.account}
     <Setup />
+  {:else if layout.compact}
+    <CompactShell />
   {:else}
     <div class="flex min-h-0 flex-1">
     <Rail />
@@ -446,17 +469,24 @@
     <div
       data-testid="toast"
       class={[
-        "fixed bottom-10 left-1/2 z-40 -translate-x-1/2 rounded-md border px-4 py-2 text-sm shadow-xl select-text",
+        "fixed left-1/2 z-40 -translate-x-1/2 rounded-md border px-4 py-2 text-sm shadow-xl select-text",
+        layout.compact ? "bottom-[calc(5rem+var(--safe-bottom))] w-max max-w-[calc(100vw-2rem)]" : "bottom-10",
         mail.toast.error ? "border-red-900/60 bg-red-950/90 text-red-200" : "border-ink-700 bg-ink-800 text-ink-100",
       ]}
     >
       {mail.toast.text}
-      {#if mail.toast.undo}<span class="ml-3 text-ink-500"><kbd>z</kbd> undo</span>{/if}
+      {#if mail.toast.undo}
+        {#if layout.compact}
+          <button data-testid="toast-undo" onclick={() => mail.undo()} class="-my-1 ml-3 rounded px-2 py-1 font-semibold text-accent">Undo</button>
+        {:else}
+          <span class="ml-3 text-ink-500"><kbd>z</kbd> undo</span>
+        {/if}
+      {/if}
     </div>
   {/if}
 
   {#if mail.account && privacyNotice && mail.overlay === null}
-    <div data-testid="privacy-notice" role="status" class="fixed bottom-10 left-4 z-30 max-w-sm space-y-2 rounded-lg border border-ink-700 bg-ink-900 p-4 text-sm text-ink-300 shadow-xl">
+    <div data-testid="privacy-notice" role="status" class="fixed {layout.compact ? 'right-4 bottom-[calc(5rem+var(--safe-bottom))]' : 'bottom-10'} left-4 z-30 max-w-sm space-y-2 rounded-lg border border-ink-700 bg-ink-900 p-4 text-sm text-ink-300 shadow-xl">
       <p>PeetMail sends crash reports and usage and performance data so problems get found and fixed. Mail, addresses, names and sign-in details are never included.</p>
       <div class="flex justify-end gap-2">
         <button data-testid="privacy-notice-settings" onclick={() => dismissPrivacyNotice(true)} class="rounded-md px-3 py-1 text-ink-300 hover:text-ink-100">Settings</button>
@@ -468,7 +498,7 @@
   {#if mail.overlay === null && !mail.composerActive}<HealthBanner />{/if}
 
   {#if mail.error}
-    <div data-testid="app-error" class="fixed right-4 bottom-10 max-w-md rounded-md border border-red-900/60 bg-red-950/80 px-3 py-2 text-sm text-red-200 select-text">
+    <div data-testid="app-error" class="fixed right-4 {layout.compact ? 'left-4 bottom-[calc(5rem+var(--safe-bottom))]' : 'bottom-10'} max-w-md rounded-md border border-red-900/60 bg-red-950/80 px-3 py-2 text-sm text-red-200 select-text">
       {mail.error}
     </div>
   {/if}

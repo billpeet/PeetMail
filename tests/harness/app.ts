@@ -29,6 +29,8 @@ export type LaunchOptions = {
   dev?: boolean;
   /** Leave the app running after this process exits (used by the drive CLI). */
   detached?: boolean;
+  /** Window and page size instead of TEST_VIEWPORT; PHONE_VIEWPORT gives the compact layout. */
+  viewport?: { width: number; height: number };
 };
 
 export type LaunchedApp = {
@@ -114,6 +116,9 @@ export function ensureBuilt({ force = false, log = console.log }: { force?: bool
  * which Windows shrinks to fit a small screen (CI runners have 1024x768).
  */
 export const TEST_VIEWPORT = { width: 1280, height: 792 };
+
+/** A phone (a Pixel 8's CSS pixels): narrower than COMPACT_MAX_WIDTH, so the compact layout. */
+export const PHONE_VIEWPORT = { width: 412, height: 915 };
 
 /** Headless unless PEETMAIL_HEADED=1 (or `headed: true`), so test windows never interrupt you. */
 export const DEFAULT_HEADED = process.env.PEETMAIL_HEADED === "1";
@@ -313,7 +318,8 @@ export async function sweepStaleDataDirs(olderThanMs = 15 * 60_000) {
   return stale.length;
 }
 
-export async function launchApp({ fake, dataDir, cdpPort, syncIntervalSecs, undoSendSecs, extraEnv, headed, dev = false, detached = false }: LaunchOptions): Promise<LaunchedApp> {
+export async function launchApp({ fake, dataDir, cdpPort, syncIntervalSecs, undoSendSecs, extraEnv, headed, dev = false, detached = false, viewport }: LaunchOptions): Promise<LaunchedApp> {
+  if (viewport) extraEnv = { ...extraEnv, PEETMAIL_WINDOW_SIZE: `${viewport.width}x${viewport.height}` };
   // A temp dir we create is ours to delete; one passed in (the drive CLI's) is kept.
   const ownsDataDir = !dataDir && !detached;
   dataDir ??= await mkdtemp(join(tmpdir(), TEMP_PREFIX));
@@ -342,7 +348,8 @@ export async function launchApp({ fake, dataDir, cdpPort, syncIntervalSecs, undo
   }
   const { browser, page } = await connect(cdpPort);
   // A hidden test window: same layout on any screen. A visible one keeps its real size.
-  if (!(headed ?? DEFAULT_HEADED)) await page.setViewportSize(TEST_VIEWPORT);
+  if (viewport) await page.setViewportSize(viewport);
+  else if (!(headed ?? DEFAULT_HEADED)) await page.setViewportSize(TEST_VIEWPORT);
   await page.waitForLoadState("domcontentloaded");
   await page.locator("body").waitFor();
   await waitForKeyboard(page);

@@ -62,8 +62,8 @@
   );
 </script>
 
-<div data-testid="setup" data-builtin={builtin.microsoft} class="grid h-full place-items-center">
-  <div class="w-[460px] space-y-6">
+<div data-testid="setup" data-builtin={builtin.microsoft} class="grid h-full place-items-center overflow-y-auto" style:padding-top="var(--safe-top)" style:padding-bottom="var(--safe-bottom)">
+  <div class="w-full max-w-[460px] space-y-6 px-6">
     <div>
       <h1 class="text-2xl font-semibold tracking-tight text-ink-100">PeetMail</h1>
       <p class="mt-1 text-sm text-ink-500">Fast, keyboard-first mail for Microsoft 365, Outlook.com and Gmail.</p>

@@ -29,6 +29,7 @@ import { prefetchBody } from "./bodies";
 import type { Snippet } from "./snippets";
 import { hasOwnText, startingSignature, withSignature } from "./signatures";
 import { calendar } from "./calendar.svelte";
+import { layout } from "./layout.svelte";
 import { visibility } from "./accounts.svelte";
 import * as selection from "./selection";
 
@@ -327,9 +328,9 @@ class MailStore {
   #navSeq = 0;
   #dwellTimer: ReturnType<typeof setTimeout> | undefined;
 
-  /** Preview layout: list on the left, the selected conversation beside it. */
+  /** Preview layout: list on the left, the selected conversation beside it. A phone has room for one. */
   get previewing(): boolean {
-    return this.boot?.preferences.layout === "preview";
+    return !layout.compact && this.boot?.preferences.layout === "preview";
   }
 
   /**

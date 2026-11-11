@@ -70,6 +70,10 @@ secret-service = { version = "5.2", features = ["rt-async-io-crypto-rust"] }
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 libc = "0.2"
 
+[target.'cfg(target_os = "android")'.dependencies]
+# Calls into the activity (commands::move_to_background); the version wry hands us.
+jni = "0.21"
+
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

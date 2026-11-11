@@ -10,10 +10,12 @@
   const until = (t: ThreadRow): string | null => ("until" in t && typeof t.until === "string" ? t.until : null);
   import { AlarmClock, Archive, Check, Cloud, Flag, LoaderCircle, Mail, MailOpen, Paperclip, Trash2 } from "@lucide/svelte";
   import { count } from "#lib/format.js";
+  import { layout } from "#lib/layout.svelte.js";
 
   // One line per row in the list layout; three (sender + date, subject, preview) in the
-  // narrower preview layout, like Outlook.
-  const ROW = $derived(mail.previewing ? 76 : 40);
+  // narrower preview layout, like Outlook, and on a phone (a little taller, for fingers).
+  const stacked = $derived(mail.previewing || layout.compact);
+  const ROW = $derived(layout.compact ? 84 : mail.previewing ? 76 : 40);
   const OVERSCAN = 10;
 
   let viewport: HTMLDivElement | undefined = $state();
@@ -100,12 +102,13 @@
           style:top="{index * ROW}px"
           style:height="{ROW}px"
           class={[
-            "group absolute inset-x-0 flex cursor-pointer items-center gap-4 border-l-2 px-5 text-sm",
+            "group absolute inset-x-0 flex cursor-pointer items-center gap-4 border-l-2 text-sm",
+            layout.compact ? "px-4" : "px-5",
             selected ? "border-accent bg-ink-800" : checked ? "border-transparent bg-accent/10 hover:bg-accent/15" : "border-transparent hover:bg-ink-900",
           ]}
         >
-          {#if mail.previewing}
-            <span class="flex min-w-0 flex-1 flex-col gap-0.5 py-2">
+          {#if stacked}
+            <span class={["flex min-w-0 flex-1 flex-col gap-0.5 py-2", layout.compact && "text-[15px]"]}>
               <span class="flex items-baseline gap-2">
                 <span class={["min-w-0 flex-1 truncate", unread ? "font-semibold text-ink-100" : "text-ink-300"]}>
                   {#if checked}<span data-testid="row-checked" title="Selected" class="mr-1.5 inline-block align-[-2px] text-accent"><Check size={14} strokeWidth={3} /></span>{/if}{#if mail.accounts.length > 1}<span data-testid="row-account" title={mail.accountOf(t.accountId)?.email} class={["mr-2 inline-block size-2 rounded-full align-middle", mail.accountColor(t.accountId)]}></span>{/if}{@render who(t)}
@@ -115,13 +118,13 @@
                 {#if t.hasAttachments}<span class="text-ink-500" title="Has attachments"><Paperclip size={13} /></span>{/if}
                 {#if t.isFlagged}<span class="text-amber-400" title="Flagged"><Flag size={13} fill="currentColor" /></span>{/if}
                 {#if until(t)}
-                  <span data-testid="snoozed-until" class="shrink-0 text-xs text-accent group-hover:hidden">{formatSendAt(until(t)!)}</span>
+                  <span data-testid="snoozed-until" class={["shrink-0 text-xs text-accent", !layout.compact && "group-hover:hidden"]}>{formatSendAt(until(t)!)}</span>
                 {:else}
-                  <span class={["shrink-0 text-xs tabular-nums group-hover:hidden", unread ? "text-ink-100" : "text-ink-500"]}>{listDate(t.receivedAt)}</span>
+                  <span class={["shrink-0 text-xs tabular-nums", !layout.compact && "group-hover:hidden", unread ? "text-ink-100" : "text-ink-500"]}>{listDate(t.receivedAt)}</span>
                 {/if}
               </span>
               <span class={["truncate", unread ? "font-semibold text-ink-100" : "text-ink-300"]}>{#if hasDraft(t)}<span data-testid="thread-draft-badge" class="mr-1.5 font-normal text-red-400">Draft</span>{/if}{t.subject || "(no subject)"}</span>
-              <span class="truncate text-xs text-ink-500">{t.preview}</span>
+              <span class={["truncate text-ink-500", layout.compact ? "text-[13px]" : "text-xs"]}>{t.preview}</span>
             </span>
           {:else}
             <span class={["w-48 shrink-0 truncate", unread ? "font-semibold text-ink-100" : "text-ink-300"]}>
@@ -143,7 +146,9 @@
               </span>
             {/if}
           {/if}
-          <!-- Quick actions replace the date on hover. -->
+          <!-- Quick actions replace the date on hover. A phone has no hover (a tap would leave
+               them stuck on); it gets swipes instead (Stage 3). -->
+          {#if !layout.compact}
           <span data-testid="row-actions" class={["hidden shrink-0 justify-end group-hover:flex", mail.previewing ? "absolute top-1 right-3 rounded-md bg-ink-800" : "w-28"]}>
             {#if t.draftId !== undefined}
               <button data-testid="row-trash" title="Discard draft (#)" class="icon-btn size-7" onclick={(e) => { e.stopPropagation(); mail.actAt(index, "trash"); }}>
@@ -169,6 +174,7 @@
             </button>
             {/if}
           </span>
+          {/if}
         </div>
       {/each}
     </div>

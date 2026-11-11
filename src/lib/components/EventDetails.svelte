@@ -215,11 +215,11 @@
     data-testid="event-details"
     onclick={(ev) => ev.target === ev.currentTarget && close()}
     role="presentation"
-    class="fixed inset-x-0 top-9 bottom-0 z-30 grid place-items-center bg-black/50"
+    class="dialog-backdrop fixed inset-x-0 top-(--chrome-top) bottom-0 z-30 grid place-items-center bg-black/50"
   >
     <!-- Capped to the window below the title bar (viewport units: a % max-height has no effect in a
          grid with an auto row). The header and buttons stay put; the details scroll. -->
-    <div data-testid="event-panel" class="flex max-h-[calc(100vh-2.25rem-3rem)] w-[min(820px,calc(100vw-4rem))] flex-col rounded-xl border border-ink-700 bg-ink-900 shadow-2xl">
+    <div data-testid="event-panel" class="dialog-panel flex max-h-[calc(100vh-2.25rem-3rem)] w-[min(820px,calc(100vw-4rem))] flex-col rounded-xl border border-ink-700 bg-ink-900 shadow-2xl">
       <div class="shrink-0 p-5 pb-0">
         <div class="flex items-start gap-3">
           <h2 data-testid="event-title" class="flex-1 text-lg font-semibold text-ink-100 select-text">{e.subject || "(no title)"}</h2>

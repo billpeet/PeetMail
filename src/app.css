@@ -23,6 +23,51 @@
 html {
   /* Native scrollbars and form controls follow the dark theme (email bodies set their own). */
   color-scheme: dark;
+  /* Where dialogs start: under the title bar. A phone has none, but its status bar and
+     gesture bar overlap the page (edge to edge), so it pads by the safe areas instead. */
+  --chrome-top: 2.25rem;
+  --safe-top: 0px;
+  --safe-bottom: 0px;
+}
+html[data-compact] {
+  --chrome-top: env(safe-area-inset-top, 0px);
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/*
+ * Dialogs on a phone (layout.svelte.ts). Each dialog's backdrop carries `dialog-backdrop`
+ * and its box `dialog-panel` (a full-screen page) or `dialog-sheet` (full width, from the
+ * top, so the on-screen keyboard below never covers it). On desktop these do nothing.
+ */
+html[data-compact] .dialog-backdrop {
+  padding: 0 !important;
+  place-items: stretch !important;
+  align-items: stretch !important;
+  justify-content: stretch !important;
+}
+html[data-compact] .dialog-panel {
+  width: 100% !important;
+  max-width: none !important;
+  height: 100% !important;
+  max-height: none !important;
+  border-radius: 0 !important;
+  border-width: 0 !important;
+  padding-bottom: var(--safe-bottom);
+}
+/* Key hints on buttons, and lines of them, mean nothing to a thumb. */
+html[data-compact] .key-hints {
+  display: none;
+}
+html[data-compact] button kbd {
+  display: none;
+}
+html[data-compact] .dialog-sheet {
+  width: 100% !important;
+  max-width: none !important;
+  max-height: 100% !important;
+  border-radius: 0 0 0.75rem 0.75rem !important;
+  border-width: 0 0 1px 0 !important;
 }
 
 html,

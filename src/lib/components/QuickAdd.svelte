@@ -122,9 +122,9 @@
   data-testid="quick-add"
   onclick={(e) => e.target === e.currentTarget && (mail.overlay = null)}
   role="presentation"
-  class="fixed inset-x-0 top-9 bottom-0 z-30 flex justify-center bg-black/50 pt-[15vh]"
+  class="dialog-backdrop fixed inset-x-0 top-(--chrome-top) bottom-0 z-30 flex justify-center bg-black/50 pt-[15vh]"
 >
-  <div class="h-fit w-[560px] overflow-hidden rounded-xl border border-ink-700 bg-ink-900 shadow-2xl">
+  <div class="dialog-sheet h-fit w-[560px] overflow-hidden rounded-xl border border-ink-700 bg-ink-900 shadow-2xl">
     <div class="flex items-center gap-3 border-b border-ink-800 px-4">
       <CalendarPlus size={18} class="shrink-0 text-accent" />
       <input

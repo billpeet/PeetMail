@@ -20,7 +20,7 @@ import { startFakeOtlp, type FakeOtlp } from "../harness/fake-otlp.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rm } from "node:fs/promises";
-import { launchApp, signIn } from "../harness/app.ts";
+import { launchApp, PHONE_VIEWPORT, signIn } from "../harness/app.ts";
 import { defaultMailbox, FOLDER_IDS } from "../harness/fixtures.ts";
 
 type Fake = Awaited<ReturnType<typeof startFakeGraph>>;
@@ -30,7 +30,9 @@ type App = Awaited<ReturnType<typeof launchApp>>;
 /** The fake update server, plus the file the app writes instead of running an installer. */
 type Updates = FakeUpdates & { installedPath: string };
 
-export const test = base.extend<{ fake: Fake; app: App; page: Page; inbox: Page; undoSendSecs: number; secondAccount: boolean; pair: Pair; withGmail: boolean; gmailExtra: number; gmail: Gmail; withUpdates: boolean; updateFeed: { stable?: Release; canary?: Release }; updateFirstCheckSecs: number; updates: Updates; withSentry: boolean; sentry: FakeSentry; withTelemetry: boolean; telemetry: FakeOtlp; builtinApps: boolean; feedbackEmail: string | null; appEnv: Record<string, string> }>({
+export const test = base.extend<{ fake: Fake; app: App; page: Page; inbox: Page; undoSendSecs: number; secondAccount: boolean; pair: Pair; withGmail: boolean; gmailExtra: number; gmail: Gmail; withUpdates: boolean; updateFeed: { stable?: Release; canary?: Release }; updateFirstCheckSecs: number; updates: Updates; withSentry: boolean; sentry: FakeSentry; withTelemetry: boolean; telemetry: FakeOtlp; builtinApps: boolean; feedbackEmail: string | null; appEnv: Record<string, string>; phone: boolean }>({
+  /** A phone-sized window (`test.use({ phone: true })`): the compact layout (docs/ANDROID.md). */
+  phone: [false, { option: true }],
   /** Act as a release build with PeetMail's own apps built in (the fakes' client IDs). */
   builtinApps: [false, { option: true }],
   /** The address Help → Report a problem offers to email (`PEETMAIL_FEEDBACK_EMAIL`). */
@@ -96,7 +98,7 @@ export const test = base.extend<{ fake: Fake; app: App; page: Page; inbox: Page;
     await fake.close();
   },
 
-  app: async ({ fake, undoSendSecs, gmail, updates, updateFirstCheckSecs, sentry, telemetry, builtinApps, feedbackEmail, appEnv }, use, testInfo) => {
+  app: async ({ fake, undoSendSecs, gmail, updates, updateFirstCheckSecs, sentry, telemetry, builtinApps, feedbackEmail, appEnv, phone }, use, testInfo) => {
     const extraEnv: Record<string, string> = {
       ...(gmail ? { PEETMAIL_GMAIL_URL: gmail.gmailUrl, PEETMAIL_GOOGLE_AUTH_URL: gmail.authUrl, PEETMAIL_GCAL_URL: `${gmail.origin}/calendar/v3` } : {}),
       ...(updates
@@ -127,7 +129,7 @@ export const test = base.extend<{ fake: Fake; app: App; page: Page; inbox: Page;
           }
         : {}),
     };
-    const app = await launchApp({ fake, undoSendSecs, extraEnv });
+    const app = await launchApp({ fake, undoSendSecs, extraEnv, viewport: phone ? PHONE_VIEWPORT : undefined });
     const consoleLines: string[] = [];
     app.page.on("console", (m) => consoleLines.push(`[${m.type()}] ${m.text()}`));
     app.page.on("pageerror", (e) => consoleLines.push(`[pageerror] ${e.stack ?? e.message}`));

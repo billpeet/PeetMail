@@ -20,8 +20,8 @@
   });
 </script>
 
-<div data-testid="whats-new" data-mode={mode} onclick={(e) => e.target === e.currentTarget && (mail.overlay = null)} role="presentation" class="fixed inset-x-0 top-9 bottom-0 z-30 grid place-items-center bg-black/60">
-  <div class="flex max-h-[80vh] w-[560px] flex-col rounded-xl border border-ink-700 bg-ink-900 shadow-2xl">
+<div data-testid="whats-new" data-mode={mode} onclick={(e) => e.target === e.currentTarget && (mail.overlay = null)} role="presentation" class="dialog-backdrop fixed inset-x-0 top-(--chrome-top) bottom-0 z-30 grid place-items-center bg-black/60">
+  <div class="dialog-panel flex max-h-[80vh] w-[560px] flex-col rounded-xl border border-ink-700 bg-ink-900 shadow-2xl">
     <div class="border-b border-ink-800 px-6 py-4">
       <h2 class="text-sm font-semibold text-ink-100">{mode === "new" ? "What's new in PeetMail" : "What's new"}</h2>
       {#if mode === "new"}<p class="mt-1 text-xs text-ink-500">Since you last looked. The full list is in the command palette: What's new.</p>{/if}

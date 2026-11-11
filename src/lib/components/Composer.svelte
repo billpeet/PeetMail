@@ -28,6 +28,7 @@
   import { expandSnippet, matchSnippets, snippetTrigger, type Snippet } from "#lib/snippets.js";
   import { SIGNATURE_CLASS } from "#lib/signatures.js";
   import { SignatureNode } from "#lib/signatureNode.js";
+  import { layout } from "#lib/layout.svelte.js";
 
   let { inline = false }: { inline?: boolean } = $props();
 
@@ -598,7 +599,7 @@
   onfocusout={(e) => {
     if (!root?.contains(e.relatedTarget as Node | null)) mail.composerFocused = false;
   }}
-  class={inline ? "mt-4 scroll-mb-6" : "fixed inset-x-0 top-9 bottom-0 z-20 flex items-end justify-center bg-black/40 p-6"}
+  class={inline ? "mt-4 scroll-mb-6" : "dialog-backdrop fixed inset-x-0 top-(--chrome-top) bottom-0 z-20 flex items-end justify-center bg-black/40 p-6"}
 >
   <div
     role="group"
@@ -606,7 +607,7 @@
     {ondragover}
     {ondragleave}
     {ondrop}
-    class={["@container relative flex flex-col rounded-xl border bg-ink-900", inline ? "border-ink-600" : "h-[70vh] w-full max-w-3xl border-ink-700 shadow-2xl"]}
+    class={["@container relative flex flex-col rounded-xl border bg-ink-900", inline ? "border-ink-600" : "dialog-panel h-[70vh] w-full max-w-3xl border-ink-700 shadow-2xl"]}
   >
     {#if dragging}
       <div data-testid="compose-drop" class="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl border-2 border-dashed border-accent bg-ink-950/80 text-sm text-ink-100">
@@ -814,7 +815,8 @@
       </form>
     {/if}
 
-    <div class="flex items-center justify-between gap-3 border-t border-ink-800 px-4 py-2.5">
+    <!-- A phone: the formatting tools on one row, the buttons that send on the next. -->
+    <div class={["flex items-center justify-between border-t border-ink-800", layout.compact ? "flex-wrap gap-x-3 gap-y-1 px-3 py-2" : "gap-3 px-4 py-2.5"]}>
       <!-- Out of the tab order: Tab goes from the text to the buttons that send. -->
       <span class="flex shrink-0 items-center gap-0.5">
         {#each tools as t (t.id)}
@@ -833,10 +835,10 @@
           </button>
         {/each}
       </span>
-      <span data-testid="compose-hint" class="min-w-0 flex-1 truncate text-xs text-ink-500">
+      <span data-testid="compose-hint" class={["min-w-0 flex-1 truncate text-xs text-ink-500", layout.compact && "hidden"]}>
         {c.draftId !== null ? "Draft saved" : isReply ? (inline ? "The message above is quoted below your reply." : "The original message is quoted below your reply.") : ""}
       </span>
-      <span class="flex shrink-0 items-center gap-2 whitespace-nowrap">
+      <span class={["flex shrink-0 items-center gap-2 whitespace-nowrap", layout.compact && "ml-auto"]}>
         <input
           data-testid="compose-file-input"
           bind:this={fileInput}

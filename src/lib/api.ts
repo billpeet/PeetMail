@@ -332,6 +332,8 @@ export const api = {
   getAutostart: () => invoke<boolean>("get_autostart"),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
   quitApp: () => invoke<void>("quit_app"),
+  /** Android: send PeetMail to the background, as back on an app's root screen does. */
+  moveToBackground: () => invoke<void>("move_to_background"),
   /** Opens a link in the browser / mail app (recorded instead in tests). */
   openExternal: (url: string) => invoke<void>("open_external", { url }),
   setSnippets: (snippets: Snippet[]) => invoke<Snippet[]>("set_snippets", { snippets }),

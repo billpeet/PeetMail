@@ -30,6 +30,8 @@
   import { getBody, peekBody } from "#lib/bodies.js";
   import { keymap } from "#lib/keys.svelte.js";
   import { mail } from "#lib/mail.svelte.js";
+  import { layout } from "#lib/layout.svelte.js";
+  import { fitScale } from "#lib/fit.js";
 
   // `images`: fetch remote images through Rust and inline them (press i in the reader).
   let { messageId, images = false }: { messageId: number; images?: boolean } = $props();
@@ -42,6 +44,8 @@
   let height = $state(untrack(() => measured.get(messageId) ?? 0));
   let ready = $state(false);
   let shownFor: number | null = null;
+  /** How far a body laid out wider than the frame was shrunk to fit it (phones only). */
+  let scale = $state(1);
 
   $effect(() => {
     const id = messageId;
@@ -71,6 +75,8 @@
     table { max-width: 100%; }
     blockquote { margin: 0 0 0 0.5em; padding-left: 0.75em; border-left: 2px solid #d4d4dc; color: #555; }
     a { color: #3b4fd8; }`;
+  // A phone has no room to spare around the mail.
+  const COMPACT_STYLE = `body { padding: 12px; font-size: 15px; }`;
 
   // Remote images are blocked by the CSP anyway, but each blocked <img> still costs a
   // request attempt, a CSP violation and an error event: ~120ms for a 300-image newsletter.
@@ -80,17 +86,36 @@
   const srcdoc = $derived(
     html === null
       ? ""
-      : `<!doctype html><html><head><meta charset="utf-8"><style>${BASE_STYLE}</style></head><body>${images ? html : neutralize(html)}</body></html>`,
+      : `<!doctype html><html><head><meta charset="utf-8"><style>${BASE_STYLE}${layout.compact ? COMPACT_STYLE : ""}</style></head><body>${images ? html : neutralize(html)}</body></html>`,
   );
 
   function onload() {
     const doc = frame?.contentDocument;
     if (!doc?.body) return;
     const id = messageId;
+    // Mail laid out for a 600px+ screen (newsletters, receipts) is zoomed out to the
+    // frame's width on a phone, as a phone's browser would, instead of scrolling sideways.
+    // Zooming the body (not the root) lets the root's height include the zoom.
+    const fitWidth = () => {
+      if (!layout.compact) return;
+      doc.body.style.zoom = "";
+      scale = fitScale(doc.documentElement.clientWidth, doc.documentElement.scrollWidth);
+      if (scale < 1) doc.body.style.zoom = String(scale);
+    };
     const fit = () => {
       height = doc.documentElement.scrollHeight;
       measured.set(id, height);
     };
+    fitWidth();
+    // Late images can widen it, and turning the phone changes the room it has.
+    for (const img of Array.from(doc.images)) img.addEventListener("load", () => (fitWidth(), fit()));
+    let width = frame!.clientWidth;
+    new ResizeObserver(() => {
+      if (!frame || frame.clientWidth === width) return; // its own height changing isn't a reason
+      width = frame.clientWidth;
+      fitWidth();
+      fit();
+    }).observe(frame!);
     fit();
     ready = true;
     shownFor = id;
@@ -115,8 +140,8 @@
   {#if !images && /src="https?:/i.test(html)}
     <p data-testid="images-blocked" class="mb-1 px-1 text-xs text-ink-500">
       Remote images hidden.
-      <button data-testid="load-images" onclick={() => (mail.imagesFor = mail.threadFor)} class="text-accent hover:underline">Load images</button>
-      or press <kbd>i</kbd>.
+      <button data-testid="load-images" onclick={() => (mail.imagesFor = mail.threadFor)} class="text-accent hover:underline">Load images</button>{#if !layout.compact}
+      or press <kbd>i</kbd>{/if}.
     </p>
   {/if}
   <iframe
@@ -129,6 +154,7 @@
     style:height="{height}px"
     style:visibility={ready ? "visible" : "hidden"}
     data-ready={ready}
+    data-scale={scale < 1 ? scale.toFixed(2) : undefined}
     class="block w-full rounded border-0 bg-white"
   ></iframe>
 {/if}

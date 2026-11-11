@@ -6,7 +6,8 @@
   import Attachments from "./Attachments.svelte";
   import InviteCard from "./InviteCard.svelte";
   import Composer from "./Composer.svelte";
-  import { Archive, ArchiveRestore, ArrowLeft, ChevronDown, ChevronUp, Flag, Forward, Inbox, Mail, Maximize2, Reply, ReplyAll, ShieldAlert, ShieldCheck, Trash2 } from "@lucide/svelte";
+  import { AlarmClock, Archive, ArchiveRestore, ArrowLeft, ChevronDown, ChevronUp, Ellipsis, Flag, Forward, Image, Inbox, Mail, Maximize2, Reply, ReplyAll, ShieldAlert, ShieldCheck, Trash2 } from "@lucide/svelte";
+  import { layout } from "#lib/layout.svelte.js";
 
   /** Shown as the reading pane beside the list (preview layout), not full width. */
   const inPane = $derived(mail.previewing && mail.view === "list");
@@ -70,16 +71,46 @@
   }
 
   const names = (list: Recipient[]) => list.map((r) => senderName(r.name, r.address)).join(", ");
+
+  // Phone: the actions that don't fit the bottom bar.
+  let more = $state(false);
+  function fromMenu(run: () => void) {
+    more = false;
+    run();
+  }
+  /** Esc (Android's back) closes the menu before leaving the conversation. */
+  function closeMenuFirst(e: KeyboardEvent) {
+    if (e.key !== "Escape" || !more) return;
+    e.preventDefault();
+    e.stopPropagation();
+    more = false;
+  }
 </script>
 
+<svelte:window onkeydowncapture={closeMenuFirst} />
+
 {#snippet action(testid: string, label: string, run: () => void, Icon: typeof Archive, extra = "")}
-  <button data-testid={testid} title={label} aria-label={label} onclick={run} class="icon-btn {extra}">
-    <Icon size={17} />
+  <button data-testid={testid} title={label} aria-label={label} onclick={run} class="icon-btn {layout.compact ? 'size-11' : ''} {extra}">
+    <Icon size={layout.compact ? 20 : 17} />
+  </button>
+{/snippet}
+
+{#snippet menuItem(testid: string, label: string, run: () => void, Icon: typeof Archive, extra = "")}
+  <button data-testid={testid} onclick={() => fromMenu(run)} class="flex min-h-12 w-full items-center gap-3 px-4 text-left text-[15px] text-ink-100 {extra}">
+    <Icon size={19} class="text-ink-500" />{label}
   </button>
 {/snippet}
 
 <div class="flex h-full flex-col">
   <!-- Every keyboard action, also reachable by mouse. Tooltips show the shortcut. -->
+  {#if layout.compact}
+  <div data-testid="reader-toolbar" class="flex h-14 shrink-0 items-center gap-1 border-b border-ink-800 px-1">
+    {@render action("reader-back", "Back to list", () => mail.back(), ArrowLeft)}
+    <span class="ml-auto text-xs text-ink-500 tabular-nums">{mail.pinned ? "" : `${mail.selected + 1} of ${mail.threads.length}`}</span>
+    {@render action("reader-prev", "Previous conversation", () => mail.move(-1), ChevronUp)}
+    {@render action("reader-next", "Next conversation", () => mail.move(1), ChevronDown)}
+  </div>
+  {:else}
   <div data-testid="reader-toolbar" class="flex h-11 shrink-0 items-center gap-1 border-b border-ink-800 px-3">
     {#if inPane}
       {@render action("reader-expand", "Open full width (Enter)", () => mail.open(), Maximize2)}
@@ -112,10 +143,11 @@
     {@render action("reader-prev", "Previous conversation (K)", () => mail.move(-1), ChevronUp)}
     {@render action("reader-next", "Next conversation (J)", () => mail.move(1), ChevronDown)}
   </div>
+  {/if}
 
 <div data-testid="reader" data-conversation-id={mail.threadFor} class="min-h-0 flex-1 overflow-y-auto">
-  <div class="mx-auto max-w-4xl px-8 py-6">
-    <h1 class="mb-5 text-xl font-semibold text-ink-100 select-text">{mail.current?.subject || "(no subject)"}</h1>
+  <div class={["mx-auto max-w-4xl", layout.compact ? "px-2 py-4" : "px-8 py-6"]}>
+    <h1 class={["font-semibold text-ink-100 select-text", layout.compact ? "mb-4 px-2 text-lg leading-snug" : "mb-5 text-xl"]}>{mail.current?.subject || "(no subject)"}</h1>
     {#if mail.invite}<InviteCard invite={mail.invite} />{/if}
 
     <div class="space-y-2">
@@ -141,7 +173,7 @@
             <span class="shrink-0 text-xs text-ink-500">{longDate(m.receivedAt)}</span>
           </button>
           {#if open}
-            <div class="px-2 pb-2"><MessageBody messageId={m.id} {images} /></div>
+            <div class={layout.compact ? "px-1 pb-1" : "px-2 pb-2"}><MessageBody messageId={m.id} {images} /></div>
             {#if m.hasAttachments}<Attachments messageId={m.id} />{/if}
           {/if}
         </article>
@@ -164,4 +196,37 @@
     {#if mail.composerInline}{#key mail.composer}<Composer inline />{/key}{/if}
   </div>
 </div>
+  {#if layout.compact}
+    <!-- The actions a thumb reaches; the rest are under "more". -->
+    <div data-testid="reader-actions" class="relative flex shrink-0 items-center justify-around border-t border-ink-800 bg-chrome px-2 py-1" style:padding-bottom="calc(0.25rem + var(--safe-bottom))">
+      {#if archiveBack}
+        {@render action("reader-archive", "Move to Inbox", () => mail.act(archiveAction), Inbox)}
+      {:else}
+        {@render action("reader-archive", "Archive", () => mail.act("archive"), Archive)}
+      {/if}
+      {#if trashBack}
+        {@render action("reader-trash", "Restore to Inbox", () => mail.act("moveToInbox"), ArchiveRestore)}
+      {:else}
+        {@render action("reader-trash", "Delete", () => mail.act("trash"), Trash2)}
+      {/if}
+      {@render action("reader-snooze", "Snooze", () => mail.startSnooze(), AlarmClock)}
+      {@render action("reader-reply", "Reply", () => mail.respond("reply"), Reply)}
+      {@render action("reader-more", "More actions", () => (more = !more), Ellipsis, more ? "text-ink-100" : "")}
+      {#if more}
+        <div role="presentation" onclick={() => (more = false)} class="fixed inset-0 z-10"></div>
+        <div data-testid="reader-menu" role="menu" class="absolute right-2 bottom-full z-20 mb-2 w-60 overflow-hidden rounded-xl border border-ink-700 bg-ink-900 py-1 shadow-2xl">
+          {@render menuItem("reader-reply-all", "Reply all", () => mail.respond("replyAll"), ReplyAll)}
+          {@render menuItem("reader-forward", "Forward", () => mail.respond("forward"), Forward)}
+          {@render menuItem("reader-flag", flagged ? "Unflag" : "Flag", () => mail.toggleFlag(), Flag, flagged ? "[&_svg]:text-amber-400" : "")}
+          {@render menuItem("reader-unread", "Mark as unread", () => mail.act("markUnread"), Mail)}
+          {#if notSpam}
+            {@render menuItem("reader-spam", "Not spam", () => mail.act("notSpam"), ShieldCheck)}
+          {:else}
+            {@render menuItem("reader-spam", "Spam", () => mail.act("spam"), ShieldAlert)}
+          {/if}
+          {#if !images}{@render menuItem("reader-images", "Load images", () => (mail.imagesFor = mail.threadFor), Image)}{/if}
+        </div>
+      {/if}
+    </div>
+  {/if}
 </div>
