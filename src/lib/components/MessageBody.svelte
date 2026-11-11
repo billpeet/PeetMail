@@ -32,6 +32,7 @@
   import { mail } from "#lib/mail.svelte.js";
   import { layout } from "#lib/layout.svelte.js";
   import { fitScale } from "#lib/fit.js";
+  import { pageSwipe } from "#lib/gestures.js";
 
   // `images`: fetch remote images through Rust and inline them (press i in the reader).
   let { messageId, images = false }: { messageId: number; images?: boolean } = $props();
@@ -129,6 +130,20 @@
       if (/^(https?:|mailto:)/i.test(href)) api.openExternal(href);
     });
     doc.addEventListener("keydown", keymap.handle);
+    // Touches in here never reach the reader (another document): a flick across the mail
+    // is handed up as `pm-swipe`, so swiping to the next conversation works over it too.
+    let touch: { x: number; y: number; at: number } | null = null;
+    doc.addEventListener("touchstart", (e) => {
+      touch = e.touches.length === 1 ? { x: e.touches[0].clientX, y: e.touches[0].clientY, at: e.timeStamp } : null;
+    }, { passive: true });
+    doc.addEventListener("touchend", (e) => {
+      const t = touch;
+      touch = null;
+      if (!t || !layout.compact || !frame) return;
+      const end = e.changedTouches[0];
+      const dir = pageSwipe(end.clientX - t.x, end.clientY - t.y, e.timeStamp - t.at);
+      if (dir) frame.dispatchEvent(new CustomEvent("pm-swipe", { bubbles: true, detail: dir }));
+    }, { passive: true });
   }
 </script>
 

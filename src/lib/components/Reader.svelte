@@ -8,6 +8,7 @@
   import Composer from "./Composer.svelte";
   import { AlarmClock, Archive, ArchiveRestore, ArrowLeft, ChevronDown, ChevronUp, Ellipsis, Flag, Forward, Image, Inbox, Mail, Maximize2, Reply, ReplyAll, ShieldAlert, ShieldCheck, Trash2 } from "@lucide/svelte";
   import { layout } from "#lib/layout.svelte.js";
+  import { pageSwipe } from "#lib/gestures.js";
 
   /** Shown as the reading pane beside the list (preview layout), not full width. */
   const inPane = $derived(mail.previewing && mail.view === "list");
@@ -71,6 +72,32 @@
   }
 
   const names = (list: Recipient[]) => list.map((r) => senderName(r.name, r.address)).join(", ");
+
+  // Phone: flick left for the next conversation, right for the previous (j / k).
+  let readerEl: HTMLDivElement | undefined = $state();
+  let touch: { x: number; y: number; at: number } | null = null;
+  function flip(dir: "next" | "prev" | null) {
+    if (!dir || !layout.compact || mail.composerActive || more) return;
+    mail.move(dir === "next" ? 1 : -1);
+  }
+  function touchStart(e: TouchEvent) {
+    touch = e.touches.length === 1 ? { x: e.touches[0].clientX, y: e.touches[0].clientY, at: e.timeStamp } : null;
+  }
+  function touchEnd(e: TouchEvent) {
+    const t = touch;
+    touch = null;
+    if (!t) return;
+    const end = e.changedTouches[0];
+    flip(pageSwipe(end.clientX - t.x, end.clientY - t.y, e.timeStamp - t.at));
+  }
+  // Flicks over a message body, handed up from its frame (MessageBody).
+  $effect(() => {
+    const el = readerEl;
+    if (!el) return;
+    const onSwipe = (e: Event) => flip((e as CustomEvent<"next" | "prev">).detail);
+    el.addEventListener("pm-swipe", onSwipe);
+    return () => el.removeEventListener("pm-swipe", onSwipe);
+  });
 
   // Phone: the actions that don't fit the bottom bar.
   let more = $state(false);
@@ -145,7 +172,7 @@
   </div>
   {/if}
 
-<div data-testid="reader" data-conversation-id={mail.threadFor} class="min-h-0 flex-1 overflow-y-auto">
+<div bind:this={readerEl} data-testid="reader" data-conversation-id={mail.threadFor} ontouchstart={touchStart} ontouchend={touchEnd} role="document" class="min-h-0 flex-1 overflow-y-auto">
   <div class={["mx-auto max-w-4xl", layout.compact ? "px-2 py-4" : "px-8 py-6"]}>
     <h1 class={["font-semibold text-ink-100 select-text", layout.compact ? "mb-4 px-2 text-lg leading-snug" : "mb-5 text-xl"]}>{mail.current?.subject || "(no subject)"}</h1>
     {#if mail.invite}<InviteCard invite={mail.invite} />{/if}

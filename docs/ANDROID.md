@@ -19,7 +19,7 @@ PeetMail on Android phones, built from the same Tauri 2 app: the Rust core uncha
 | 0 Spike: it builds and signs in | Done (emulator; Gmail and a real phone still to try) |
 | 1 Rust core on Android | Done |
 | 2 Compact layout (testable on Windows) | Done |
-| 3 Touch: gestures, sheets, back button | Not started |
+| 3 Touch: gestures, sheets, back button | Done |
 | 4 Phone-native plumbing (files, share, notifications, secure storage) | Not started |
 | 5 Background sync | Not started |
 | 6 Distribution | Not started |
@@ -118,11 +118,15 @@ Done. One set of components with two layouts; `layout.compact` (`src/lib/layout.
 
 ## Stage 3: touch
 
-- Swipe on a list row: right to archive (`e`), left to snooze (`h`); both configurable later. The row slides away and undo (`z`) works the same. Long press starts a selection (the existing batching), tap toggles more rows.
-- Swipe left/right in the reader for next/previous conversation (`j`/`k`).
-- Pull to refresh on the list (`sync_now`).
-- Back and the toast's Undo button: done in Stage 2. Still to check: Android 17's predictive back animation (the previous screen peeking during the gesture) with the WebView.
-- Tests: the `compact` project drives touch with CDP `Input.dispatchTouchEvent` (works over WebView2's CDP) for swipe, long press and pull to refresh.
+Done. What a finger's movement means lives in `src/lib/gestures.ts` (unit-tested); the components only feed it positions.
+
+- **List rows** (`ThreadList`, touch pointers only, `touch-action: pan-y` so scrolling stays native): drag right past the threshold (a third of the row, at most 120 px) to archive, left to snooze; what letting go will do shows under the row, which slides back if you stop short. A drag that leans vertical scrolls instead. Drafts don't swipe.
+- **Long press** (450 ms) starts a selection, or adds to it; while selecting, taps add or remove rows and the header turns into the selection bar (archive, delete, read, snooze). A long press doesn't open the browser's context menu.
+- **Pull to refresh**: pulling down at the top of the list (damped) past 64 px syncs, as Ctrl+R does.
+- **Flick between conversations** in the reader: left for the next, right for the previous (`j`/`k`), over the mail too. Message bodies are iframes that keep their touches, so `MessageBody` classifies its own flicks and hands them up as a `pm-swipe` event.
+- Back and the undo button: done in Stage 2.
+- Tests: `tests/e2e/compact.spec.ts` drives touch through DevTools (`Input.dispatchTouchEvent`): swipes both ways, a short swipe, a vertical drag, long press and taps, pull to refresh, flicks over the subject and over the body. Checked by hand on the emulator with real touch input too, which found a bug the DevTools touches didn't: Android sends no click after a long press or a drag, so "ignore the click after a gesture" has to expire.
+- Not done: Android 17's predictive back animation (the previous screen peeking during the gesture) is untried with the WebView; configurable swipe actions.
 
 ## Stage 4: phone-native plumbing
 

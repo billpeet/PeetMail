@@ -2,9 +2,43 @@
 // one screen at a time, a bottom bar, the mailboxes in a drawer, dialogs as full pages.
 // Escape stands in for Android's back button, which sends it (+page.svelte, androidBack).
 
+import type { Page } from "@playwright/test";
 import { test, expect, row, folderConversations, snap } from "./fixtures";
 
 test.use({ phone: true });
+
+type Point = { x: number; y: number };
+
+/** A finger, through DevTools (Chromium turns these into the touch and pointer events a phone sends). */
+async function finger(page: Page) {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+  const at = (p: Point) => [{ x: Math.round(p.x), y: Math.round(p.y), id: 1 }];
+  return {
+    /** Down at `from`, through `steps` moves to `to` over `ms`, up. */
+    async drag(from: Point, to: Point, { steps = 10, ms = 200 } = {}) {
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: at(from) });
+      for (let i = 1; i <= steps; i++) {
+        await page.waitForTimeout(ms / steps);
+        await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: at({ x: from.x + ((to.x - from.x) * i) / steps, y: from.y + ((to.y - from.y) * i) / steps }) });
+      }
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    },
+    async press(p: Point, ms: number) {
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: at(p) });
+      await page.waitForTimeout(ms);
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    },
+    tap: (p: Point) => cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: at(p) }).then(() => cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] })),
+  };
+}
+
+/** The middle of an element, and points across it. */
+async function across(page: Page, locator: ReturnType<Page["locator"]>) {
+  const b = (await locator.boundingBox())!;
+  const y = b.y + b.height / 2;
+  return { mid: { x: b.x + b.width / 2, y }, left: { x: b.x + 20, y }, right: { x: b.x + b.width - 20, y }, box: b };
+}
 
 test("the phone layout: no title bar or rail, a bottom bar, and a conversation opens full screen", async ({ inbox: page }, testInfo) => {
   await expect(page.getByTestId("compact-shell")).toBeVisible();
@@ -168,3 +202,83 @@ test("archived from the reader lands in Done, as on desktop", async ({ inbox: pa
   await page.getByTestId("reader-archive").click();
   await expect.poll(() => folderConversations(page, "archive"), { timeout: 10_000 }).toContain("conv-plain");
 });
+
+// ---- Touch (Stage 3) ----
+
+test("swiping a row right archives it, with the action shown underneath as you drag", async ({ inbox: page }) => {
+  const f = await finger(page);
+  const r = await across(page, row(page, "conv-plain"));
+  await f.drag(r.left, r.right);
+  await expect(row(page, "conv-plain")).toHaveCount(0);
+  await expect(page.getByTestId("toast")).toContainText("Archived");
+  await expect.poll(() => folderConversations(page, "archive"), { timeout: 10_000 }).toContain("conv-plain");
+});
+
+test("swiping a row left snoozes it; a short swipe springs back and does nothing", async ({ inbox: page }) => {
+  const f = await finger(page);
+  let r = await across(page, row(page, "conv-plain"));
+  await f.drag(r.mid, { x: r.mid.x + 40, y: r.mid.y });
+  await expect(row(page, "conv-plain")).toBeVisible();
+  await expect(page.getByTestId("compact-shell")).toHaveAttribute("data-view", "list");
+  await expect(page.getByTestId("swipe-under")).toHaveCount(0);
+  // It slides back to where it was, and the next tap still opens a conversation.
+  await expect.poll(async () => (await row(page, "conv-plain").boundingBox())!.x).toBe(r.box.x);
+  await page.waitForTimeout(500);
+  await f.tap((await across(page, row(page, "conv-plain"))).mid);
+  await expect(page.getByTestId("reader")).toHaveAttribute("data-conversation-id", "conv-plain");
+  await page.keyboard.press("Escape");
+
+  r = await across(page, row(page, "conv-plain"));
+  await f.drag(r.right, r.left);
+  await expect(page.getByTestId("snooze")).toBeVisible();
+});
+
+test("a vertical drag scrolls the list instead of swiping", async ({ inbox: page }) => {
+  const f = await finger(page);
+  const list = page.getByTestId("thread-list");
+  const r = await across(page, list);
+  await f.drag({ x: r.mid.x, y: r.box.y + r.box.height - 40 }, { x: r.mid.x + 15, y: r.box.y + 60 }, { steps: 12, ms: 300 });
+  await expect.poll(() => list.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+  await expect(page.getByTestId("toast")).toHaveCount(0);
+  await expect(page.getByTestId("snooze")).toHaveCount(0);
+});
+
+test("a long press starts a selection, taps add to it, and the bar acts on all of it", async ({ inbox: page }) => {
+  const f = await finger(page);
+  await f.press((await across(page, row(page, "conv-plain"))).mid, 700);
+  await expect(page.getByTestId("selection-count")).toHaveText("1 selected");
+  // Selecting, a tap adds a row rather than opening it.
+  await f.tap((await across(page, row(page, "conv-hostile"))).mid);
+  await expect(page.getByTestId("selection-count")).toHaveText("2 selected");
+  await expect(page.getByTestId("compact-shell")).toHaveAttribute("data-view", "list");
+  await page.getByTestId("selection-archive").click();
+  await expect(row(page, "conv-plain")).toHaveCount(0);
+  await expect(row(page, "conv-hostile")).toHaveCount(0);
+});
+
+test("pulling down at the top of the list syncs", async ({ inbox: page, fake }) => {
+  await fake.control("deliver", { subject: "Pulled in" });
+  await expect(page.getByTestId("thread-row").filter({ hasText: "Pulled in" })).toHaveCount(0);
+  const f = await finger(page);
+  const r = await across(page, page.getByTestId("thread-list"));
+  await f.drag({ x: r.mid.x, y: r.box.y + 30 }, { x: r.mid.x, y: r.box.y + 330 }, { steps: 15, ms: 400 });
+  await expect(page.getByTestId("thread-row").filter({ hasText: "Pulled in" })).toHaveCount(1);
+});
+
+test("flicking across a conversation moves to the next and back, over the mail itself too", async ({ inbox: page }) => {
+  const f = await finger(page);
+  const first = row(page, "conv-plain");
+  await first.click();
+  const reader = page.getByTestId("reader");
+  await expect(reader).toHaveAttribute("data-conversation-id", "conv-plain");
+  // Over the subject line (the reader's own page)...
+  const subject = await across(page, reader.locator("h1"));
+  await f.drag(subject.right, subject.left, { steps: 6, ms: 150 });
+  await expect(reader).not.toHaveAttribute("data-conversation-id", "conv-plain");
+  // ...and back again over the message body (inside its frame).
+  await expect(page.getByTestId("message-body").first()).toHaveAttribute("data-ready", "true");
+  const body = await across(page, page.getByTestId("message-body").first());
+  await f.drag(body.left, body.right, { steps: 6, ms: 150 });
+  await expect(reader).toHaveAttribute("data-conversation-id", "conv-plain");
+});
+
