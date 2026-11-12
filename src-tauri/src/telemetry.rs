@@ -313,23 +313,32 @@ fn build(endpoint: &str, install_id: &str) -> std::result::Result<Providers, Box
     let headers = headers();
     let timeout = Duration::from_secs(5);
     let url = |signal: &str| format!("{endpoint}/v1/{signal}");
+    // The exporters' default client aborts the process on Android (android::tls_client).
+    #[cfg(target_os = "android")]
+    let client = crate::android::tls_blocking_client(timeout)?;
 
-    let spans = SpanExporter::builder()
-        .with_http()
+    let spans = SpanExporter::builder().with_http();
+    #[cfg(target_os = "android")]
+    let spans = spans.with_http_client(client.clone());
+    let spans = spans
         .with_protocol(Protocol::HttpJson)
         .with_endpoint(url("traces"))
         .with_headers(headers.clone())
         .with_timeout(timeout)
         .build()?;
-    let metrics = MetricExporter::builder()
-        .with_http()
+    let metrics = MetricExporter::builder().with_http();
+    #[cfg(target_os = "android")]
+    let metrics = metrics.with_http_client(client.clone());
+    let metrics = metrics
         .with_protocol(Protocol::HttpJson)
         .with_endpoint(url("metrics"))
         .with_headers(headers.clone())
         .with_timeout(timeout)
         .build()?;
-    let logs = LogExporter::builder()
-        .with_http()
+    let logs = LogExporter::builder().with_http();
+    #[cfg(target_os = "android")]
+    let logs = logs.with_http_client(client.clone());
+    let logs = logs
         .with_protocol(Protocol::HttpJson)
         .with_endpoint(url("logs"))
         .with_headers(headers)

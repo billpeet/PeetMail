@@ -124,12 +124,27 @@ pub struct CacheLimits {
     pub body_cache_mb: i64,
 }
 
+/// How long a connection may take to open.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// How long a request may go without receiving anything, waiting for the response (which
+/// includes uploading the request: a big message on a slow phone link) or between chunks of
+/// it. Without a limit, a request that starts while Android has cut PeetMail off the network
+/// (it does in the background) waited forever, holding the sync lock, so no sync ran again.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The client every Graph and Gmail call goes through.
+fn http_client(connect: std::time::Duration, read: std::time::Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent(concat!("PeetMail/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(connect)
+        .read_timeout(read)
+        .build()
+        .expect("http client")
+}
+
 impl AppState {
     pub fn new(db: Db) -> Self {
-        let http = reqwest::Client::builder()
-            .user_agent(concat!("PeetMail/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .expect("http client");
+        let http = http_client(CONNECT_TIMEOUT, READ_TIMEOUT);
         Self {
             db,
             http,
@@ -355,6 +370,25 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn a_request_that_never_gets_an_answer_times_out() {
+        // A server that accepts the connection and then says nothing, as a request does when
+        // Android cuts PeetMail off the network mid-way.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let http = super::http_client(std::time::Duration::from_secs(5), std::time::Duration::from_millis(300));
+        let started = std::time::Instant::now();
+        let err = http.get(format!("http://{addr}/")).send().await.expect_err("no answer should be an error");
+        assert!(err.is_timeout(), "{err}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    }
     use super::*;
 
     #[test]

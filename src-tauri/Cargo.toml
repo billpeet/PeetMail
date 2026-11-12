@@ -76,6 +76,12 @@ jni = "0.21"
 # Logging when Android starts PeetMail only for its background check (background.rs);
 # the version tauri-plugin-log uses.
 android_logger = "0.15"
+# Sentry's and OpenTelemetry's HTTP client (reqwest 0.13, shared with them through these
+# features) checks certificates with rustls-platform-verifier, which on Android aborts unless
+# set up over JNI with its own Kotlin classes. android::tls_client hands them clients that
+# trust these roots instead, as our own reqwest 0.12 calls do.
+reqwest_013 = { package = "reqwest", version = "0.13", default-features = false, features = ["rustls", "blocking"] }
+webpki-root-certs = "1"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

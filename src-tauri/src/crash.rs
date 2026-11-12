@@ -149,7 +149,27 @@ fn start(minidumps: bool) {
     }
     #[cfg(mobile)]
     let _ = minidumps;
+    #[cfg(target_os = "android")]
+    match crate::android::tls_client() {
+        Ok(client) => options.transport = Some(Arc::new(AndroidTransport(client))),
+        Err(e) => {
+            // Sentry's own client would abort the process on Android (android::tls_client).
+            log::error!("crash reports: off, {e}");
+            return;
+        }
+    }
     *GUARD.lock().unwrap_or_else(|e| e.into_inner()) = Some(sentry::init(options));
+}
+
+/// Sentry's reqwest transport, on the client from `android::tls_client`.
+#[cfg(target_os = "android")]
+struct AndroidTransport(reqwest_013::Client);
+
+#[cfg(target_os = "android")]
+impl sentry::TransportFactory for AndroidTransport {
+    fn create_transport_with_options(&self, options: sentry::TransportOptions) -> Arc<dyn sentry::Transport> {
+        Arc::new(sentry::transports::ReqwestHttpTransportOptions::from(options).with_client(self.0.clone()).build())
+    }
 }
 
 /// After the database opens: the install ID, the saved choice, and the values to strip.

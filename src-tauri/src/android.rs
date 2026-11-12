@@ -18,6 +18,28 @@ use crate::error::{AppError, Result};
 
 static HANDLE: OnceLock<PluginHandle<Wry>> = OnceLock::new();
 
+/// Mozilla's root certificates (webpki-root-certs, the set our own reqwest 0.12 calls trust).
+fn tls_roots() -> Vec<reqwest_013::Certificate> {
+    webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().filter_map(|c| reqwest_013::Certificate::from_der(c).ok()).collect()
+}
+
+/// An HTTP client for Sentry (crash.rs). Its default client checks certificates with
+/// rustls-platform-verifier, which aborts the process on Android: the first release build
+/// died on its first crash-report upload. This one trusts [`tls_roots`] only.
+pub fn tls_client() -> Result<reqwest_013::Client> {
+    reqwest_013::Client::builder().tls_certs_only(tls_roots()).build().map_err(|e| AppError::Other(format!("HTTP client: {e}")))
+}
+
+/// The same for OpenTelemetry's exporters (telemetry.rs), which use reqwest's blocking
+/// client. Built on a thread of its own: a blocking client can't be made inside an async
+/// runtime.
+pub fn tls_blocking_client(timeout: std::time::Duration) -> Result<reqwest_013::blocking::Client> {
+    std::thread::spawn(move || reqwest_013::blocking::Client::builder().tls_certs_only(tls_roots()).timeout(timeout).build())
+        .join()
+        .map_err(|_| AppError::Other("HTTP client: building it panicked".into()))?
+        .map_err(|e| AppError::Other(format!("HTTP client: {e}")))
+}
+
 pub fn plugin() -> TauriPlugin<Wry> {
     Builder::new("peetmail")
         .setup(|_app, api| {
@@ -35,12 +57,32 @@ pub struct Rejected {
     pub message: String,
 }
 
+/// How long a Kotlin call may take. None waits on the user, so this is only reached when the
+/// call never runs: Tauri queues it for the activity's main thread and waits with no limit,
+/// and a PeetMail started behind the lock screen left the first sync's key unwrap waiting
+/// there for good, holding the sync lock so no sync ran again.
+const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn call_raw<T: DeserializeOwned>(command: &str, payload: Value) -> std::result::Result<T, Rejected> {
     let handle = HANDLE.get().ok_or_else(|| Rejected { code: None, message: "the Android plugin isn't loaded".into() })?;
-    handle.run_mobile_plugin(command, payload).map_err(|e| match e {
-        tauri::plugin::mobile::PluginInvokeError::InvokeRejected(r) => Rejected { code: r.code, message: r.message.unwrap_or_default() },
-        other => Rejected { code: None, message: other.to_string() },
-    })
+    // On a thread of its own so the wait can be cut short; a call that never runs leaves
+    // only that thread parked.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let name = command.to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send(handle.run_mobile_plugin::<Value>(name, payload));
+    });
+    let value = match rx.recv_timeout(CALL_TIMEOUT) {
+        Ok(r) => r.map_err(|e| match e {
+            tauri::plugin::mobile::PluginInvokeError::InvokeRejected(r) => Rejected { code: r.code, message: r.message.unwrap_or_default() },
+            other => Rejected { code: None, message: other.to_string() },
+        })?,
+        Err(_) => {
+            log::warn!("Android didn't run {command} within {}s", CALL_TIMEOUT.as_secs());
+            return Err(Rejected { code: None, message: format!("Android didn't answer ({command})") });
+        }
+    };
+    serde_json::from_value(value).map_err(|e| Rejected { code: None, message: format!("{command}: {e}") })
 }
 
 fn call<T: DeserializeOwned>(command: &str, payload: Value) -> Result<T> {
