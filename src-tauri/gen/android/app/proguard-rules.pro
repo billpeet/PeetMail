@@ -22,3 +22,9 @@
 # The background check calls into Rust by this name (src-tauri/src/background.rs).
 -keepclasseswithmembernames class com.peetsoftware.peetmail.SyncWorker$Companion { native <methods>; }
 -keepclasseswithmembernames class com.peetsoftware.peetmail.SyncWorker { native <methods>; }
+
+# WorkManager makes these by reflection. Its own keep rules should cover them, but the first
+# release build (AGP 9, R8) dropped WorkDatabase_Impl's constructor and crashed at startup.
+-keep class * extends androidx.room.RoomDatabase { <init>(); }
+-keep class * extends androidx.work.ListenableWorker { <init>(android.content.Context, androidx.work.WorkerParameters); }
+-keep class * extends androidx.work.InputMerger { <init>(); }

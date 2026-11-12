@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canaryVersion, changelogFor, problems, withVersion, type Texts } from "./version.ts";
+import { androidVersionCode, canaryVersion, changelogFor, problems, withVersion, type Texts } from "./version.ts";
 
 const texts = (v = "0.2.0"): Texts => ({
   packageJson: `{\n  "name": "peetmail",\n  "version": "${v}",\n  "devDependencies": { "x": "1.0.0" }\n}\n`,
@@ -65,6 +65,27 @@ describe("canary version", () => {
   it("rejects a bad run number", () => {
     expect(() => canaryVersion("0.2.0", 0)).toThrow();
     expect(() => canaryVersion("0.2.0", NaN)).toThrow();
+  });
+});
+
+describe("android version code", () => {
+  it("sorts like the versions, so every update installs over the build before it", () => {
+    const order = ["0.2.1", "0.2.2-canary.39", "0.2.2-canary.40", "0.2.2", "0.3.0-canary.1", "0.3.0-beta.2", "0.3.0", "1.0.0", "20.99.99"];
+    const codes = order.map(androidVersionCode);
+    expect(codes).toEqual([...codes].sort((a, b) => a - b));
+    expect(new Set(codes).size).toBe(codes.length);
+    expect(androidVersionCode("0.2.2-canary.40")).toBe(2_020_040);
+    expect(androidVersionCode("0.2.1")).toBe(2_019_999);
+  });
+
+  it("is above Tauri's default code, which the first builds used", () => {
+    expect(androidVersionCode("0.2.1")).toBeGreaterThan(2001);
+  });
+
+  it("refuses versions it can't order", () => {
+    for (const v of ["0.2.2-canary.9999", "0.100.0", "0.2.100", "21.0.0", "0.3.0-beta", "1.2"]) {
+      expect(() => androidVersionCode(v), v).toThrow();
+    }
   });
 });
 

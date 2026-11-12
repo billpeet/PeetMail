@@ -8,9 +8,9 @@ name: Release
 #   stable  a tag like v0.2.0. Drafted with latest.json; publishing the draft (by hand) is
 #           what makes the stable channel offer it, through releases/latest.
 #
-# Each release has a Windows installer (NSIS) and a Linux AppImage, built side by side and
-# published together with one latest.json listing both. Both run after the full CI, so
-# nothing ships that hasn't passed it.
+# Each release has a Windows installer (NSIS), a Linux AppImage and an Android APK, built
+# side by side and published together, with one latest.json listing the desktop builds. All
+# run after the full CI, so nothing ships that hasn't passed it.
 
 on:
   push:
@@ -241,9 +241,99 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  android:
+    # The Android APK (docs/ANDROID.md), arm64 only: no 32-bit phone runs Android 17. Signed
+    # with the release key, which must never change (Android refuses an update signed by
+    # any other), and published beside the desktop builds. Phones update from the release
+    # page (or an app like Obtainium that watches it); PeetMail can't update itself here yet.
+    name: Build (android)
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: src-tauri -> target
+          shared-key: release-android
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install the Android 17 SDK platform
+        # The runner image has the SDK and NDK, but not always the newest platform.
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-37.0" "build-tools;37.0.0" > /dev/null
+
+      - name: Set the canary version
+        if: env.CHANNEL == 'canary'
+        run: node scripts/version.ts set ${{ env.VERSION }}
+
+      - name: Build the APK
+        shell: bash
+        run: |
+          export NDK_HOME="$ANDROID_NDK_LATEST_HOME"  # the runner image's newest NDK
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/peetmail-android.p12"
+          export PEETMAIL_ANDROID_KEYSTORE="$RUNNER_TEMP/peetmail-android.p12"
+          # Codes must sort like the versions, or Android refuses the update (scripts/version.ts).
+          code=$(node scripts/version.ts android-code "$VERSION")
+          pnpm tauri android build --apk --target aarch64 --config "{\"bundle\":{\"android\":{\"versionCode\":$code}}}"
+          rm -f "$PEETMAIL_ANDROID_KEYSTORE"
+        env:
+          KEYSTORE_BASE64: ${{ secrets.PEETMAIL_ANDROID_KEYSTORE_BASE64 }}
+          PEETMAIL_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.PEETMAIL_ANDROID_KEYSTORE_PASSWORD }}
+          # As the desktop build: compiled in.
+          PEETMAIL_CHANNEL: ${{ env.CHANNEL }}
+          PEETMAIL_UPDATE_REPO: ${{ github.repository }}
+          PEETMAIL_SENTRY_DSN: ${{ vars.PEETMAIL_SENTRY_DSN }}
+          PEETMAIL_FEEDBACK_EMAIL: ${{ vars.PEETMAIL_FEEDBACK_EMAIL }}
+          PEETMAIL_OTLP_ENDPOINT: ${{ vars.PEETMAIL_OTLP_ENDPOINT }}
+          PEETMAIL_OTLP_HEADERS: ${{ secrets.PEETMAIL_OTLP_HEADERS }}
+          PEETMAIL_MS_CLIENT_ID: ${{ secrets.PEETMAIL_MS_CLIENT_ID }}
+          PEETMAIL_GOOGLE_CLIENT_ID: ${{ secrets.PEETMAIL_GOOGLE_CLIENT_ID }}
+          PEETMAIL_GOOGLE_CLIENT_SECRET: ${{ secrets.PEETMAIL_GOOGLE_CLIENT_SECRET }}
+
+      - name: Collect the APK
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/assets"
+          mkdir -p "$out"
+          apk=src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
+          # An unsigned build (no key) comes out as ...-release-unsigned.apk, which phones won't install.
+          test -f "$apk" || { echo "::error::no signed APK at $apk"; ls src-tauri/gen/android/app/build/outputs/apk/universal/release/ || true; exit 1; }
+          cp "$apk" "$out/PeetMail_${VERSION}_arm64.apk"
+          # Signed for the updater too, so PeetMail can check downloads itself once it updates in-app.
+          pnpm tauri signer sign "$out/PeetMail_${VERSION}_arm64.apk"
+          ls -l "$out"
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: assets-android
+          path: ${{ runner.temp }}/assets/
+          retention-days: 7
+          if-no-files-found: error
+
   publish:
     name: Publish (${{ startsWith(github.ref, 'refs/tags/') && 'stable' || 'canary' }})
-    needs: [version, build]
+    needs: [version, build, android]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -273,7 +363,8 @@ jobs:
           $base = "https://github.com/$($env:GITHUB_REPOSITORY)/releases/download/$($env:TAG)"
           $exe = "PeetMail_$($env:VERSION)_x64-setup.exe"
           $appImage = "PeetMail_$($env:VERSION)_amd64.AppImage"
-          foreach ($f in @($exe, "$exe.sig", $appImage, "$appImage.sig")) {
+          $apk = "PeetMail_$($env:VERSION)_arm64.apk"
+          foreach ($f in @($exe, "$exe.sig", $appImage, "$appImage.sig", $apk)) {
             if (-not (Test-Path -LiteralPath (Join-Path $out $f) -PathType Leaf)) { throw "Build output missing: $f" }
           }
           if ($env:CHANNEL -eq 'stable') {

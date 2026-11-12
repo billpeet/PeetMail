@@ -4,8 +4,20 @@ PeetMail runs on Android phones from Android 17. It's the same app as on your PC
 
 ## Install
 
-1. On your phone, download `PeetMail_<version>.apk` from the [releases page](https://github.com/billpeet/peetmail/releases).
+1. On your phone, open the [releases page](https://github.com/billpeet/peetmail/releases) and download `PeetMail_<version>_arm64.apk` from the newest release. Releases marked **Canary** get every change as it lands; the others are stable.
 2. Open it. Android asks to allow installing apps from your browser the first time: allow it, then go back and choose **Install**.
+
+## Updating
+
+PeetMail can't update itself on a phone yet. Install a newer APK over it the same way; your accounts and mail stay.
+
+To be told about new versions and install them in two taps, use [Obtainium](https://obtainium.imranr.dev), a free app that watches the releases page:
+
+1. Install Obtainium, then **Add app** and paste `https://github.com/billpeet/peetmail`.
+2. For canary builds, turn on **Include prereleases**. Leave it off for stable releases only.
+3. Choose **Add**. If PeetMail is already installed, Obtainium picks it up; otherwise it offers to install it.
+
+Obtainium checks every few hours and notifies you when there's a new version; tap it and confirm Android's install prompt. Android only installs PeetMail over a copy signed by the same key, so an update can't come from anywhere else.
 
 ## Signing in
 
@@ -47,6 +59,6 @@ Android decides when the checks actually run, and holds them back to save batter
 
 ## Not on Android (yet)
 
-- PeetMail can't update itself on a phone yet: download the new APK from the releases page and open it.
+- Updating from inside PeetMail: see [Updating](#updating).
 - Starting when you sign in to your computer, the tray, and the window settings are desktop only.
 - Keyboard shortcuts work with a hardware keyboard, but most of them are about the desktop layout.

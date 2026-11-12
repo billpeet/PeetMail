@@ -23,6 +23,8 @@ Canary versions sort between stable releases: after `0.2.0` comes `0.2.1-canary.
 | `PEETMAIL_MS_CLIENT_ID` | Application (client) ID of the built-in Entra app (`04e0699b-…`, the `PeetMail` registration in `metroid.net.au`) | No. Without it the app asks for a client ID |
 | `PEETMAIL_GOOGLE_CLIENT_ID` | Client ID of the built-in Google "Desktop app" OAuth client | No |
 | `PEETMAIL_GOOGLE_CLIENT_SECRET` | Its client secret (not confidential for desktop clients, but keep it out of the repo) | No |
+| `PEETMAIL_ANDROID_KEYSTORE_BASE64` | The Android signing keystore (PKCS12, key alias `peetmail`), base64 (see below) | Yes. Every release has an APK |
+| `PEETMAIL_ANDROID_KEYSTORE_PASSWORD` | Its password (the store and the key share it) | Yes |
 
 | `SENTRY_AUTH_TOKEN` | Sentry org auth token with release and project write access, for uploading symbols and source maps | No. Without it uploads are skipped with a warning, and stack traces in Sentry stay unreadable for that build |
 
@@ -94,6 +96,22 @@ Then:
 A tag with a pre-release suffix (`v0.3.0-beta.1`) is drafted as a GitHub pre-release. It's never "latest", so the Stable channel ignores it; share its installer link directly.
 
 If the build fails, fix it, then re-run the workflow, or move the tag to the fixed commit (`git tag -f v0.2.0 && git push -f origin v0.2.0`). A re-run against an existing draft replaces its assets. A published release is never rebuilt: bump the version.
+
+### The Android signing key
+
+Every APK is signed with one key, and Android installs an update only over a copy signed by the same key. Changing it means every phone uninstalls PeetMail (losing its local data) and installs again, so it never changes. It lives in the two secrets above, with the keystore file and its password in the password manager; on Martin's PC, in `~/.peetmail-release/`. Its certificate's SHA-256 is `8B:F8:9B:C1:5A:D4:DE:4A:CB:9D:F8:A6:84:08:89:A1:31:DD:97:25:EB:66:34:A5:FC:1E:CF:B9:EB:59:ED:10`.
+
+To build a signed APK by hand, set `PEETMAIL_ANDROID_KEYSTORE` to the keystore's path and `PEETMAIL_ANDROID_KEYSTORE_PASSWORD`, then `pnpm tauri android build --apk --target aarch64`. Without them the build comes out unsigned. Pass a version code below the next canary's (`node scripts/version.ts android-code <version>`), or the canaries won't install over it: `--config '{"bundle":{"android":{"versionCode":N}}}'`.
+
+### Android
+
+The `android` job builds `PeetMail_<version>_arm64.apk` beside the desktop builds and every release carries it, with a `.sig` from the updater key. Its version code comes from the version (`scripts/version.ts android-code`) so codes sort like versions; Android refuses to install a lower one. Phones update by installing the newer APK, by hand or through Obtainium watching the releases page (`docs/user/android.md`). There's no Android entry in `latest.json` yet: PeetMail doesn't update itself on a phone.
+
+By hand, on a phone, from the release page:
+
+- [ ] The APK installs over the previous release's, and PeetMail opens still signed in.
+- [ ] A Microsoft sign-in comes back to PeetMail on its own.
+- [ ] With PeetMail closed for half an hour, new mail notifies, and a tap opens it.
 
 ### Pulling a bad release
 

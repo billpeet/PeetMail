@@ -22,7 +22,7 @@ PeetMail on Android phones, built from the same Tauri 2 app: the Rust core uncha
 | 3 Touch: gestures, sheets, back button | Done |
 | 4 Phone-native plumbing (files, share, notifications, secure storage) | Done (the Microsoft deep link waits on its redirect URI being registered) |
 | 5 Background sync | Done (emulator) |
-| 6 Distribution | Not started |
+| 6 Distribution | Signed APK on every release; updates by hand or Obtainium. In-app updates and an emulator smoke test still to do |
 
 ## Decisions
 
@@ -183,12 +183,16 @@ Not done:
 
 ## Stage 6: distribution
 
-- Signing key kept like the updater key (`docs/SECRETS.md`); CI builds a signed APK on tags (arm64 only: no 32-bit phones run Android 17).
-- Channel: the signed APK attached to each GitHub Release (AAB not needed). Canary and stable follow the desktop channels.
-- Updates in the app: the release feed gains an `android` entry (APK URL, size, SHA-256, minisign signature from the existing updater key). PeetMail checks it as desktop does, downloads in the background, checks the signature, and opens the system installer (`REQUEST_INSTALL_PACKAGES`, a `FileProvider` URI). The first install needs "Install unknown apps" allowed for the browser; later ones for PeetMail itself. Covered by the fake update server in the harness tests on the Rust side.
-- The APK signing key must never change: Android refuses an update signed by a different key, and the only way out is uninstalling, which loses local data.
-- CI: an `android` job builds the APK, boots an emulator, installs it and runs a smoke test, like `tests/linux/smoke.sh`. Android WebView exposes CDP (`adb forward ... localabstract:webview_devtools_remote_<pid>`), so a later step can run a few Playwright specs on the emulator against fake Graph at `10.0.2.2`.
-- `CHANGELOG.md` and the What's New dialog work as on desktop; `docs/RELEASING.md` gains the Android steps.
+Done so far:
+- **Signing.** One release key, forever: Android refuses an update signed by any other, and the only way out is uninstalling, which loses local data. Gradle signs with it when `PEETMAIL_ANDROID_KEYSTORE` and `PEETMAIL_ANDROID_KEYSTORE_PASSWORD` are set; without them a release build is unsigned. Kept like the updater key (`docs/SECRETS.md`, `docs/RELEASING.md` → The Android signing key).
+- **Version codes.** Tauri's default code (`major * 1000000 + minor * 1000 + patch`) gives every canary of a patch the same code. `scripts/version.ts android-code` makes them sort like the versions, so each canary installs over the one before and the next stable over them; CI passes it as `bundle.android.versionCode`.
+- **Releases.** `release.yml`'s `android` job builds `PeetMail_<version>_arm64.apk` (arm64 only: no 32-bit phone runs Android 17), signs it, adds a minisign `.sig` from the updater key, and `publish` attaches both to every canary and stable release. If it fails, nothing is published, as with the desktop builds.
+- **Updates, for now:** install the newer APK, by hand or with [Obtainium](https://obtainium.imranr.dev) watching the releases page (`docs/user/android.md` → Updating).
+
+Next:
+- **Updates in the app.** The release feed gains an `android` entry (APK URL, size, minisign signature, already made by CI). PeetMail checks it as desktop does, downloads in the background, checks the signature, and opens the system installer (`REQUEST_INSTALL_PACKAGES`, a `FileProvider` URI); the footer offers it like "restart to update". One tap to confirm is unavoidable for a sideloaded app. Covered by the fake update server in the harness tests on the Rust side.
+- **CI smoke test.** An emulator job that installs the APK, starts it and checks it renders, like `tests/linux/smoke.sh`. Android WebView exposes CDP (`adb forward ... localabstract:webview_devtools_remote_<pid>`), so a later step can run a few Playwright specs on the emulator against fake Graph at `10.0.2.2`.
+- Crash symbols: the APK's `.so` isn't uploaded to Sentry yet, so native Android crashes won't symbolicate.
 
 ## Risks
 

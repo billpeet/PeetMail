@@ -7,6 +7,7 @@
 //                                               (not a canary) also turn CHANGELOG.md's
 //                                               Unreleased section into 1.2.3's
 //   node scripts/version.ts canary 42           print the canary version for CI run 42
+//   node scripts/version.ts android-code 1.2.3  print the Android versionCode for a version
 //   node scripts/version.ts notes 1.2.3         print 1.2.3's changelog lines (release notes);
 //                                               fails if there are none
 
@@ -51,6 +52,31 @@ export function canaryVersion(base: string, run: number): string {
   if (!Number.isInteger(run) || run < 1) throw new Error(`run number must be a positive integer, got ${run}`);
   const [major, minor, patch] = [m[1], m[2], Number(m[3])];
   return `${major}.${minor}.${m[4] ? patch : patch + 1}-canary.${run}`;
+}
+
+/**
+ * The Android versionCode for a version. Android only installs an APK over one with a lower
+ * or equal code, so codes must sort like the versions: every canary above the one before,
+ * and below the release it leads to (0.2.1 < 0.2.2-canary.39 < 0.2.2-canary.40 < 0.2.2).
+ * Tauri's default (major * 1000000 + minor * 1000 + patch) gives every canary of a patch the
+ * same code. So: ((major * 100 + minor) * 100 + patch) * 10000, plus the pre-release's last
+ * number, or 9999 for a release. Fits under Android's 2,100,000,000 to major 20.
+ */
+export function androidVersionCode(version: string): number {
+  const m = /^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/.exec(version);
+  if (!m) throw new Error(`"${version}" isn't a semver version`);
+  const [major, minor, patch] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (minor > 99 || patch > 99) throw new Error(`${version}: minor and patch must be under 100 for an Android versionCode`);
+  let build = 9999;
+  if (m[4] !== undefined) {
+    const n = /(\d+)$/.exec(m[4]);
+    if (!n) throw new Error(`${version}: the pre-release needs a number at the end (like -canary.42) for an Android versionCode`);
+    build = Number(n[1]);
+    if (build > 9998) throw new Error(`${version}: pre-release number ${build} is too big for an Android versionCode (max 9998)`);
+  }
+  const code = ((major * 100 + minor) * 100 + patch) * 10000 + build;
+  if (code > 2_100_000_000) throw new Error(`${version}: versionCode ${code} is over Android's limit`);
+  return code;
 }
 
 /**
@@ -113,8 +139,10 @@ function main() {
     console.log(notes);
   } else if (cmd === "canary" && args[0]) {
     console.log(canaryVersion(JSON.parse(texts.packageJson).version, Number(args[0])));
+  } else if (cmd === "android-code" && args[0]) {
+    console.log(androidVersionCode(args[0]));
   } else {
-    console.error("usage: node scripts/version.ts check [--tag vX.Y.Z] | set <version> | canary <run number> | notes <version>");
+    console.error("usage: node scripts/version.ts check [--tag vX.Y.Z] | set <version> | canary <run number> | android-code <version> | notes <version>");
     process.exit(2);
   }
 }
