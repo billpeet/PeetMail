@@ -12,6 +12,7 @@ Unreleased into that version's section when cutting a stable release.
 
 ## Unreleased
 
+- PeetMail runs on Android phones (Android 17 and newer): download `PeetMail_<version>_arm64.apk` from the releases page. It checks for mail and sends what's waiting with the app closed. See Help (**F1**) → PeetMail on Android.
 - Invitations to recurring meetings now show the RSVP card, with the next meeting and how the series repeats. Answering covers the whole series, and **Show in calendar** opens the series, so deleting or editing it there says it means every meeting.
 - If an invitation's meeting details can't be loaded, PeetMail now tells you instead of leaving the RSVP card out without a word.
 - New and existing events can get a Teams meeting (Google Meet on Google calendars): tick **Teams meeting** in the event editor or press **Ctrl+M**, and the join link is added when you save.
