@@ -99,13 +99,12 @@ mod jni_entry {
         let _ = APP.set(app.clone());
     }
 
-    /// Logging when Android started the process for the job (the app's log plugin sets up
-    /// its own otherwise): to logcat, like the app's.
+    /// Logging when Android started the process for the job: to logcat, like the app's.
+    /// The app may start in this process later and takes over the logger then
+    /// (logging.rs); claiming it outright here made that app's setup abort.
     fn init_logging() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            android_logger::init_once(android_logger::Config::default().with_max_level(log::LevelFilter::Info).with_tag("PeetMail"));
-        });
+        let config = android_logger::Config::default().with_max_level(log::LevelFilter::Info).with_tag("PeetMail");
+        crate::logging::install_if_unset(Box::new(android_logger::AndroidLogger::new(config)), log::LevelFilter::Info);
     }
 
     /// Stack for the thread a check runs on. Tokio's workers get 2 MiB, which the app's syncs

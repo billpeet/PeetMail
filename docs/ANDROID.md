@@ -163,6 +163,7 @@ A WorkManager job, `SyncWorker.kt`, runs every 15 minutes (or hourly, or never: 
 - The sync and outbox locks are process-wide statics.
 - Startup resets in-flight sends only if it can take the outbox lock. Otherwise the job may be mid-send, and resetting would send the message twice.
 - Neither side holds the database for long, and SQLite's WAL lets the two connections share the file.
+- The process has one logger (the `log` crate allows one, for good). Both sides go through `logging.rs`: the job's logcat logger only if nothing logs yet, and the app's replaces it.
 
 The core is behind a trait object, so the Rust unit tests (which build only headless cores) don't link Tauri's runtime; Windows won't even load a test binary that does.
 
@@ -193,6 +194,7 @@ Found on a real phone (Galaxy S25 Ultra, Android 17), none of which the emulator
 - **R8 dropped WorkManager's database constructor**, so the first release build crashed at start. Kept explicitly in `proguard-rules.pro`.
 - **Crash reports aborted the process.** Release builds carry the Sentry DSN; Sentry's and OpenTelemetry's HTTP client (reqwest 0.13) checks certificates with `rustls-platform-verifier`, which on Android must be set up over JNI with its own Kotlin classes, or it aborts ("Expect rustls-platform-verifier to be initialized") the first time anything is sent. `android::tls_client` / `tls_blocking_client` give them clients that trust webpki's roots, as our reqwest 0.12 calls do.
 - **A sync stuck for good after unlocking**, with PeetMail started behind the lock screen. Not reproduced on the emulator, so not pinned down. Nothing can wait forever any more: the shared HTTP client has a 20 s connect and 120 s read timeout (it had none), and Kotlin calls give up after 30 s (Tauri waits for them with no limit). The worst case is one failed sync; the next one runs.
+- **Opening PeetMail crashed it, often two to seven times running.** Logcat's crash buffer: `Failed to setup app: error encountered during setup hook: attempted to set a logger after the logging system was already initialized`, 15 times from 20 to 28 November, each a second or two before a run that started. A background check had started the process first and claimed the logger with `android_logger`, so the app's `set_boxed_logger` failed, setup returned an error, and Tauri aborted. It happened before crash reporting starts (Android only learns its data folder in setup), so neither Sentry nor Grafana saw it. Fixed in `logging.rs`; a logger failure is no longer fatal at startup either.
 
 Next:
 - **Updates in the app.** The release feed gains an `android` entry (APK URL, size, minisign signature, already made by CI). PeetMail checks it as desktop does, downloads in the background, checks the signature, and opens the system installer (`REQUEST_INSTALL_PACKAGES`, a `FileProvider` URI); the footer offers it like "restart to update". One tap to confirm is unavoidable for a sideloaded app. Covered by the fake update server in the harness tests on the Rust side.

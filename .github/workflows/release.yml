@@ -31,7 +31,7 @@ env:
   # Crash reports (src-tauri/src/crash.rs). The DSN is compiled in; it isn't secret.
   # Uploads of symbols and source maps need the SENTRY_AUTH_TOKEN secret and are skipped,
   # with a warning, until it's set.
-  SENTRY_ORG: ${{ vars.SENTRY_ORG || 'metroid' }}
+  SENTRY_ORG: ${{ vars.SENTRY_ORG || 'peet-software' }}
   SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT || 'peetmail' }}
   SENTRY_CLI: '@sentry/cli@3.6.0'
 
