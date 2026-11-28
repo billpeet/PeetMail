@@ -49,6 +49,13 @@ test("all-day events go in as dates in your time zone", async ({ inbox: page, fa
   expect(body.start.dateTime).toMatch(/^\d{4}-\d{2}-\d{2}T00:00:00$/);
   expect(body.start.timeZone).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
   await page.keyboard.press("2");
+  await expect(page.getByTestId("week-view")).toBeVisible();
+  // On a weekend "fri" is next week's (weeks start on Monday): go to the week it's in.
+  const monday = new Date();
+  monday.setHours(0, 0, 0, 0);
+  monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
+  const days = Math.round((new Date(`${body.start.dateTime.slice(0, 10)}T00:00:00`).getTime() - monday.getTime()) / 86_400_000);
+  for (let w = 0; w < Math.floor(days / 7); w++) await page.keyboard.press("ArrowRight");
   await expect(page.locator("[data-testid=week-all-day]", { hasText: "Offsite planning" })).toBeVisible();
 });
 

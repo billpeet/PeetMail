@@ -34,7 +34,7 @@ And these **variables** (Settings → Secrets and variables → Actions → Vari
 |---|---|
 | `PEETMAIL_SENTRY_DSN` | The Sentry project's DSN, compiled into release builds. Unset: no crash reports |
 | `PEETMAIL_FEEDBACK_EMAIL` | Where Help → Report a problem's "Write an email" goes. Unset: the option is hidden |
-| `SENTRY_ORG` / `SENTRY_PROJECT` | Where uploads go. Default `metroid` / `peetmail` |
+| `SENTRY_ORG` / `SENTRY_PROJECT` | Where uploads go. Default `peet-software` / `peetmail` |
 | `PEETMAIL_OTLP_ENDPOINT` | The OTLP/HTTP gateway's base URL (the app adds `/v1/traces` etc.). Unset: no usage telemetry |
 
 And for telemetry, one more secret: `PEETMAIL_OTLP_HEADERS`, the gateway's auth header(s) as `key=value,key=value` (e.g. `Authorization=Basic …`). It's compiled into the app, so use a write-only token that's PeetMail's own.
@@ -62,7 +62,7 @@ Nothing is committed: the canary version only exists in the build.
 A stable release is a canary build that has proved itself. Promote the commit when all of these hold:
 
 - [ ] **Soaked**: it (or a canary with the same changes) has been on the Canary channel for **at least two days**, used daily by you and at least one other tester. A schema migration or a sign-in or sync change wants a week.
-- [ ] **No new crashes**: Sentry (`metroid/peetmail`) has no unresolved issues first seen on canary in that time: search `is:unresolved environment:canary age:-7d`. Anything there is fixed, or understood and judged harmless and resolved with a note.
+- [ ] **No new crashes**: Sentry (`peet-software/peetmail`) has no unresolved issues first seen on canary in that time: search `is:unresolved environment:canary age:-7d`. Anything there is fixed, or understood and judged harmless and resolved with a note.
 - [ ] **No unanswered feedback**: Sentry's **User Feedback** has nothing from canary testers still waiting on a fix meant for this release.
 - [ ] **Telemetry looks normal** in Grafana against the last stable week (metric names as sent; Prometheus shows dots as underscores and adds `_total` to counters):
   - `http.request.duration` by `http.response.status_code`: no new run of 4xx/5xx for any `url.template`.

@@ -27,7 +27,7 @@ How PeetMail goes from "runs from source on one PC" to "installed and auto-updat
 | Identity | Identifier `com.peetsoftware.peetmail`, publisher "Peet Software". |
 | Release channels | Canary (a build of every push to `master`) and Stable (tagged releases only). |
 | Linux packaging | One AppImage for every distribution, self-updating through the same channels. See Stage 7. |
-| Sentry | Project `peetmail` in the `metroid` org. DSN in the repo variable `PEETMAIL_SENTRY_DSN`; uploads use the `SENTRY_AUTH_TOKEN` secret. |
+| Sentry | Project `peetmail` in the `peet-software` org. DSN in the repo variable `PEETMAIL_SENTRY_DSN`; uploads use the `SENTRY_AUTH_TOKEN` secret. |
 | OTLP token | Gateway `https://otlp.biap.cc` (Traefik basic auth in front of Alloy on futura). PeetMail has its own user, `peetmail`; its header is the `PEETMAIL_OTLP_HEADERS` secret and the URL the `PEETMAIL_OTLP_ENDPOINT` variable. The route only reaches Alloy's OTLP receiver, so the credential can write and nothing else. |
 
 ## Where we started

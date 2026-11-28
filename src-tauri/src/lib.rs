@@ -22,6 +22,7 @@ mod graph_send;
 mod health;
 mod items;
 mod lifecycle;
+mod logging;
 mod mail;
 mod meeting_links;
 mod notify;
@@ -332,8 +333,10 @@ pub fn run() {
             // recent lines ride along with crash reports as breadcrumbs (see crash.rs).
             let (log_plugin, max_level, logger) = log.split(app.handle())?;
             app.handle().plugin(log_plugin)?;
-            log::set_boxed_logger(Box::new(crash::TrailLogger(logger))).map_err(|e| tauri::Error::Anyhow(e.into()))?;
-            log::set_max_level(max_level);
+            // Never fatal: starting without a log beats not starting.
+            if let Err(e) = logging::install(Box::new(crash::TrailLogger(logger)), max_level) {
+                eprintln!("PeetMail: no log this run: {e}");
+            }
             install_panic_logging();
             let dir = match data_dir_override {
                 Some(dir) => dir,
