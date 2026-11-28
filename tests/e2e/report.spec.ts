@@ -1,33 +1,41 @@
 import { test, expect } from "./fixtures";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { inflateRawSync } from "node:zlib";
 import type { Page } from "@playwright/test";
 
 /** Things from the signed-in account's mailbox that must never be in diagnostics. */
 const PERSONAL = ["boris@peetmail.test", "Boris Dragon", "priya@fabrikam.io", "sam.carter@contoso.com", "Q4 planning doc", "Beetroot supplier"];
 
-/** Unzips with PowerShell (no zip library in the tests) and returns every file's text by name. */
+/**
+ * Every file's text in a zip, by name. Read here from the central directory (no zip library
+ * in the tests): extracting with PowerShell's Expand-Archive came back empty on CI's Windows
+ * image from late November 2026, and an empty result passes the "nothing personal" checks.
+ */
 function unzip(zip: Buffer | string): Record<string, string> {
-  const dir = mkdtempSync(join(tmpdir(), "peetmail-diag-"));
-  try {
-    const file = typeof zip === "string" ? zip : join(dir, "in.zip");
-    if (typeof zip !== "string") writeFileSync(file, zip);
-    const out = join(dir, "out");
-    execFileSync("powershell", ["-NoProfile", "-Command", `Expand-Archive -LiteralPath '${file}' -DestinationPath '${out}'`]);
-    const files: Record<string, string> = {};
-    for (const name of readdirSync(out, { recursive: true }) as string[]) {
-      try {
-        files[name.replaceAll("\\", "/")] = readFileSync(join(out, name), "utf8");
-      } catch {
-        // a directory
-      }
-    }
-    return files;
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
+  const buf = typeof zip === "string" ? readFileSync(zip) : zip;
+  const end = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  if (end < 0) throw new Error("not a zip: no end of central directory");
+  const count = buf.readUInt16LE(end + 10);
+  let p = buf.readUInt32LE(end + 16);
+  const files: Record<string, string> = {};
+  for (let i = 0; i < count; i++) {
+    if (buf.readUInt32LE(p) !== 0x02014b50) throw new Error(`zip: bad central directory entry ${i}`);
+    const method = buf.readUInt16LE(p + 10);
+    const size = buf.readUInt32LE(p + 20);
+    const [nameLen, extraLen, commentLen] = [buf.readUInt16LE(p + 28), buf.readUInt16LE(p + 30), buf.readUInt16LE(p + 32)];
+    const local = buf.readUInt32LE(p + 42);
+    const name = buf.toString("utf8", p + 46, p + 46 + nameLen);
+    p += 46 + nameLen + extraLen + commentLen;
+    if (name.endsWith("/")) continue;
+    if (size === 0xffffffff || local === 0xffffffff) throw new Error(`zip: ${name} needs zip64`);
+    const start = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28);
+    const data = buf.subarray(start, start + size);
+    if (method === 8) files[name] = inflateRawSync(data).toString("utf8");
+    else if (method === 0) files[name] = data.toString("utf8");
+    else throw new Error(`zip: ${name} uses compression method ${method}`);
   }
+  return files;
 }
 
 async function openReport(page: Page) {
